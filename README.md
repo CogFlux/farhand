@@ -35,13 +35,30 @@ same remote hands.
 
 ## Install
 
-Requires Rust (stable) locally, OpenSSH locally, and on the remote: Linux
-with `bash`, `timeout` (coreutils), `base64`, an SFTP subsystem (default in
-sshd), and ideally `ripgrep` for `remote_glob` / `remote_grep` (both fall back
-to `find` / `grep`).
+Local: macOS or Linux with OpenSSH. Remote: Linux with `bash`, `timeout`
+(coreutils), `base64`, an SFTP subsystem (default in sshd), and ideally
+`ripgrep` for `remote_glob` / `remote_grep` (both fall back to `find` /
+`grep`). Windows is not supported: FarHand relies on OpenSSH connection
+multiplexing over a Unix socket.
+
+**Prebuilt binary** (no Rust needed) — one file into `~/.local/bin`, checksum
+verified:
 
 ```
-cargo install --path crates/farhand-mcp   # puts `farhand` on PATH
+curl -fsSL https://raw.githubusercontent.com/CogFlux/farhand/main/install.sh | sh
+```
+
+Or download `farhand-<version>-<target>.tar.gz` from the
+[releases page](https://github.com/CogFlux/farhand/releases) yourself, or
+`cargo binstall farhand-mcp`.
+
+**From source** (Rust stable): `cargo install --path crates/farhand-mcp`
+puts `farhand` in `~/.cargo/bin`; or `cargo build --release` and point
+`FARHAND_BIN` at `target/release/farhand`.
+
+Then, either way:
+
+```
 farhand install opencode                  # and/or claude-code, codex — once per machine
 cd ~/my-project
 farhand init > .farhand.toml              # edit host, workdir, allowed_dirs
@@ -50,9 +67,7 @@ farhand check                             # connects once and reports
 
 That is all: a project is remote exactly when it has a `.farhand.toml`.
 There is no global configuration to write unless you want one (see
-Configure). `cargo install` writes to `~/.cargo/bin`; use
-`cargo build --release` and point `FARHAND_BIN` at `target/release/farhand`
-if you would rather not.
+Configure).
 
 See `docs/USAGE.md` for the step-by-step guide and per-agent configuration.
 

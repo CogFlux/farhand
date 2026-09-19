@@ -8,6 +8,12 @@ license.workspace = true
 name = "farhand"
 path = "src/main.rs"
 
+# `cargo binstall farhand-mcp` fetches the release asset instead of building.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/farhand-{ version }-{ target }{ archive-suffix }"
+bin-dir = "farhand-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [dependencies]
 farhand-core = { path = "../farhand-core" }
 anyhow.workspace = true
