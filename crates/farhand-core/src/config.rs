@@ -368,11 +368,23 @@ impl Config {
             return Err(Error::Config("timeouts must be positive".into()));
         }
         let mut dirs = Vec::with_capacity(self.local.allowed_dirs.len());
+        let home = dirs::home_dir();
         for d in &self.local.allowed_dirs {
             let expanded = expand_home(d);
             if !expanded.is_absolute() {
                 return Err(Error::Config(format!(
                     "local.allowed_dirs entry must be absolute: {}",
+                    d.display()
+                )));
+            }
+            // The allowlist is for a folder the user set aside, never the
+            // whole machine or home: that would hand every non-credential
+            // file to the model, and a project-level config could do it
+            // without the user noticing.
+            if expanded.parent().is_none() || home.as_deref() == Some(expanded.as_path()) {
+                return Err(Error::Config(format!(
+                    "local.allowed_dirs may not contain `/` or the home directory ({}); \
+                     allow a specific folder instead",
                     d.display()
                 )));
             }
@@ -505,6 +517,21 @@ mod tests {
         assert_eq!(cfg.remote.shell, vec!["bash", "-lc"]);
         assert_eq!(cfg.local.allowed_dirs.len(), 1);
         assert!(cfg.local.allowed_dirs[0].is_absolute());
+    }
+
+    #[test]
+    fn rejects_home_and_root_as_allowed_dirs() {
+        for d in ["/", "~"] {
+            let err = Config::parse(&format!(
+                "[remote]\nhost='h'\nworkdir='/w'\n[local]\nallowed_dirs=['{d}']"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("home directory"), "{d}: {err}");
+        }
+        assert!(
+            Config::parse("[remote]\nhost='h'\nworkdir='/w'\n[local]\nallowed_dirs=['~/out']")
+                .is_ok()
+        );
     }
 
     #[test]

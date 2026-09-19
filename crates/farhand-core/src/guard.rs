@@ -150,6 +150,30 @@ const DENIED_CONTENT: &[(&str, &str)] = &[
     ),
 ];
 
+/// Names that may never be *created* locally by a download, on top of
+/// [`DENIED_NAMES`] and [`DENIED_DIRS`]: files and directories an editor,
+/// shell or agent executes or trusts when it opens the folder. A remote that
+/// plants one of these inside the allowlist would otherwise get code run
+/// locally, or repoint FarHand itself. Ordinary project files (package.json,
+/// Makefile) are not listed: nothing runs them until the user does.
+const LOCAL_TRUSTED_NAMES: &[&str] = &[
+    ".farhand.toml",
+    ".vscode",
+    ".idea",
+    ".git",
+    ".husky",
+    ".devcontainer",
+    ".envrc",
+    ".direnv",
+    ".mise.toml",
+    "mise.toml",
+    ".pre-commit-config.yaml",
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".cursorrules",
+    ".windsurfrules",
+];
+
 #[derive(Debug, Clone)]
 pub struct Finding {
     pub rule: &'static str,
@@ -233,6 +257,33 @@ impl Guard {
         None
     }
 
+    /// Why a download may not land at this local path (given relative to
+    /// the allowlisted root), if it may not. Credential-shaped names are
+    /// refused as on upload, plus anything an editor or agent would trust
+    /// or execute when opening the folder.
+    pub fn check_download_target(&self, rel: &Path) -> Option<Finding> {
+        if let Some(f) = self.check_path(rel) {
+            return Some(f);
+        }
+        for comp in rel.components() {
+            if let Component::Normal(c) = comp {
+                let s = c.to_string_lossy();
+                if LOCAL_TRUSTED_NAMES
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(&s))
+                {
+                    return Some(Finding {
+                        rule: "local-trusted-name",
+                        detail: format!(
+                            "`{s}` is something an editor or agent would execute or trust locally"
+                        ),
+                    });
+                }
+            }
+        }
+        None
+    }
+
     /// Why these bytes may not be sent, if they may not.
     pub fn check_content(&self, bytes: &[u8]) -> Option<Finding> {
         let hits = self.content.matches(bytes);
@@ -268,6 +319,22 @@ impl Guard {
         }
         self.ensure_content(&format!("the content of `{}`", path.display()), bytes)
     }
+
+    /// Refuse if a download may not be written to `rel` (relative to the
+    /// allowlisted root it lands in).
+    pub fn ensure_download(&self, rel: &Path) -> Result<()> {
+        match self.check_download_target(rel) {
+            Some(f) => Err(Error::Denied(format!(
+                "download refused: `{}` (rule: {}, {}). Downloads never create credential \
+                 files or anything a local tool would execute; pick another name or fetch it \
+                 yourself.",
+                rel.display(),
+                f.rule,
+                f.detail
+            ))),
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +344,24 @@ mod tests {
 
     fn guard() -> Guard {
         Guard::new(&GuardConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn download_targets() {
+        let g = guard();
+        for p in [
+            ".claude/settings.json",
+            "proj/.vscode/tasks.json",
+            ".farhand.toml",
+            "x/.git/hooks/pre-commit",
+            "id_rsa",
+            "sub/CLAUDE.md",
+        ] {
+            assert!(g.check_download_target(Path::new(p)).is_some(), "{p}");
+        }
+        for p in ["logs/app.log", "package.json", "src/main.rs", "Makefile"] {
+            assert!(g.check_download_target(Path::new(p)).is_none(), "{p}");
+        }
     }
 
     #[test]

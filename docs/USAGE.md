@@ -41,7 +41,17 @@ allowed_dirs = ["~/FarHand-Outbox", "/Users/me/Documents/myapp/assets"]
 ```
 
 `farhand check` prints the instructions the model will receive. If
-`ssh <host>` works in a terminal, this works.
+`ssh <host>` works in a terminal, this works. Host keys are checked strictly
+(`StrictHostKeyChecking=yes`): FarHand only connects to hosts already in
+`~/.ssh/known_hosts`, so connect once by hand before the first `farhand check`.
+
+`allowed_dirs` is meant for a folder you set aside for the model (an
+"outbox" you drop things into, or an assets folder). The local project folder
+itself is usually *not* worth allowing: with a remote workdir there is
+nothing in it but `.farhand.toml`, and if it is a real checkout you would be
+handing the model every non-credential file in it. `/` and `~` are refused.
+Treat a `.farhand.toml` found in a repository you did not write like a
+`.vscode/tasks.json`: read it before trusting it.
 
 The OpenCode plugin picks it up automatically (`--config <worktree>/.farhand.toml`).
 Other agents pass it with `farhand serve --config /path/to/.farhand.toml` or

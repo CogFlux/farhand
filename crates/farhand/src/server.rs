@@ -228,6 +228,8 @@ impl FarHand {
              never the local machine. Use remote_ls, remote_read, remote_glob, remote_grep, \
              remote_bash, remote_write and remote_edit for everything unless the user explicitly \
              says local; they replace the local shell and file tools, which are disabled. \
+             remote_bash already runs on the remote: never ssh or scp from inside it to reach \
+             the same host or the user's machine. \
              The local machine is closed except for these directories: {dirs}. Use local_ls and \
              local_read only when the user explicitly asks about those local folders, `upload` to \
              copy from them to the remote, and `download` to copy from the remote into them. \
@@ -250,7 +252,7 @@ impl FarHand {
 
     #[tool(
         name = "remote_bash",
-        description = "Run a shell command on the remote host. Returns stdout, stderr and the exit code. Output is bounded; use head/tail/grep to narrow it. Runs in the remote workdir unless cwd is given."
+        description = "Run a shell command ON THE REMOTE HOST (you are already there: do not ssh/scp/rsync to the same host or to the user's machine from inside it — use remote_read/remote_write to touch remote files and upload/download to cross to the local allowlist). Returns stdout, stderr and the exit code. Output is bounded; use head/tail/grep to narrow it. Runs in the remote workdir unless cwd is given."
     )]
     async fn remote_bash(
         &self,
@@ -339,7 +341,7 @@ impl FarHand {
 
     #[tool(
         name = "remote_edit",
-        description = "Replace an exact string in a remote file. old_string must match exactly once (whitespace included) unless replace_all is true."
+        description = "Replace an exact string in a remote file. old_string must match exactly once (whitespace included) unless replace_all is true. Line endings are handled: write old_string with plain newlines even if the file is CRLF."
     )]
     async fn remote_edit(
         &self,
@@ -376,20 +378,12 @@ impl FarHand {
                 return Ok(self.fail(rec, started, Error::Invalid("file is not UTF-8".into())))
             }
         };
-        let count = text.matches(&a.old_string).count();
         let replace_all = a.replace_all.unwrap_or(false);
-        let new_text = match count {
-            0 => return Ok(self.fail(rec, started, Error::Invalid("old_string not found in file".into()))),
-            1 => text.replacen(&a.old_string, &a.new_string, 1),
-            _ if replace_all => text.replace(&a.old_string, &a.new_string),
-            n => {
-                return Ok(self.fail(
-                    rec,
-                    started,
-                    Error::Invalid(format!("old_string matches {n} times; add context to make it unique or set replace_all")),
-                ))
-            }
-        };
+        let (new_text, count, crlf) =
+            match apply_edit(&text, &a.old_string, &a.new_string, replace_all) {
+                Ok(r) => r,
+                Err(e) => return Ok(self.fail(rec, started, e)),
+            };
         rec.bytes = Some(new_text.len() as u64);
         match self
             .inner()
@@ -399,8 +393,12 @@ impl FarHand {
         {
             Ok(path) => {
                 self.finish(rec, started);
-                let n = if replace_all { count } else { 1 };
-                Ok(ok(format!("Edited {path}: {n} replacement(s)")))
+                let note = if crlf {
+                    " (CRLF line endings kept)"
+                } else {
+                    ""
+                };
+                Ok(ok(format!("Edited {path}: {count} replacement(s){note}")))
             }
             Err(e) => Ok(self.fail(rec, started, e)),
         }
@@ -569,12 +567,26 @@ impl FarHand {
             Ok(entries) => {
                 self.finish(rec, started);
                 let mut s = format!("{}\n", dir.display());
+                let mut hidden = 0;
                 for e in entries {
+                    // Credential-shaped entries are invisible: they can
+                    // neither be read nor uploaded, so listing them only
+                    // invites attempts.
+                    if self.inner().guard.check_path(&dir.join(&e.name)).is_some() {
+                        hidden += 1;
+                        continue;
+                    }
                     if e.is_dir {
                         s.push_str(&format!("  {}/\n", e.name));
                     } else {
                         s.push_str(&format!("  {}  ({} bytes)\n", e.name, e.size));
                     }
+                }
+                if hidden > 0 {
+                    s.push_str(&format!(
+                        "  [{hidden} credential-like entr{} not shown]\n",
+                        if hidden == 1 { "y" } else { "ies" }
+                    ));
                 }
                 Ok(ok(s))
             }
@@ -602,6 +614,12 @@ impl FarHand {
             Ok(r) => r,
             Err(e) => return Ok(self.fail(rec, started, e)),
         };
+        // What could never be uploaded is not shown either: the model has
+        // no business with local credential material, and a file it cannot
+        // see it cannot re-encode into something the guard would pass.
+        if let Err(e) = self.inner().guard.ensure_upload(&file, &bytes) {
+            return Ok(self.deny(rec, started, e));
+        }
         rec.bytes = Some(len);
         self.finish(rec, started);
         Ok(read_result(&bytes, len, max, a.offset, a.limit))
@@ -793,6 +811,46 @@ fn exec_result(out: &ExecOutput) -> CallToolResult {
     }
 }
 
+/// Apply an exact-string edit. Files with CRLF line endings are matched
+/// with LF-normalised strings — `remote_read` shows lines without the
+/// `\r`, so that is what the model sends back — and written back as CRLF.
+/// Returns the new text, the number of replacements, and whether the file
+/// uses CRLF.
+fn apply_edit(
+    text: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> farhand_core::Result<(String, usize, bool)> {
+    let crlf = text.contains("\r\n");
+    let (text, old, new) = if crlf {
+        (
+            text.replace("\r\n", "\n"),
+            old.replace("\r\n", "\n"),
+            new.replace("\r\n", "\n"),
+        )
+    } else {
+        (text.to_string(), old.to_string(), new.to_string())
+    };
+    let count = text.matches(&old).count();
+    let edited = match count {
+        0 => return Err(Error::Invalid("old_string not found in file".into())),
+        1 => text.replacen(&old, &new, 1),
+        _ if replace_all => text.replace(&old, &new),
+        n => {
+            return Err(Error::Invalid(format!(
+                "old_string matches {n} times; add context to make it unique or set replace_all"
+            )))
+        }
+    };
+    let n = if replace_all { count } else { 1 };
+    if crlf {
+        Ok((edited.replace('\n', "\r\n"), n, true))
+    } else {
+        Ok((edited, n, false))
+    }
+}
+
 fn read_result(
     bytes: &[u8],
     len: u64,
@@ -849,4 +907,31 @@ fn transfer_summary(verb: &str, r: &TransferReport) -> String {
         ));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_matches_lf_strings_in_crlf_files() {
+        let file = "a:\r\n  x: 1\r\n  y: 2\r\n";
+        let (out, n, crlf) =
+            apply_edit(file, "  x: 1\n  y: 2", "  x: 1\n  z: 3\n  y: 2", false).unwrap();
+        assert!(crlf);
+        assert_eq!(n, 1);
+        assert_eq!(out, "a:\r\n  x: 1\r\n  z: 3\r\n  y: 2\r\n");
+        // CRLF in the request is accepted too.
+        let (out2, _, _) = apply_edit(file, "  x: 1\r\n  y: 2", "  q\r\n", false).unwrap();
+        assert_eq!(out2, "a:\r\n  q\r\n\r\n");
+    }
+
+    #[test]
+    fn edit_plain_lf_and_uniqueness() {
+        let file = "one\ntwo\none\n";
+        assert!(apply_edit(file, "one", "1", false).is_err());
+        let (out, n, crlf) = apply_edit(file, "one", "1", true).unwrap();
+        assert_eq!((out.as_str(), n, crlf), ("1\ntwo\n1\n", 2, false));
+        assert!(apply_edit(file, "three", "3", false).is_err());
+    }
 }

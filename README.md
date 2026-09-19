@@ -141,11 +141,11 @@ The tools then appear as `farhand_remote_bash`, `farhand_upload`, and so on.
 | `remote_bash` | Run a command on the remote (bounded output, remote `timeout`, local watchdog). |
 | `remote_read` | Read a remote file with line numbers; `offset`/`limit` page through it. |
 | `remote_write` | Create or overwrite a remote file; parents are created. |
-| `remote_edit` | Replace an exact, unique string in a remote file (`replace_all` optional). |
+| `remote_edit` | Replace an exact, unique string in a remote file (`replace_all` optional; CRLF files are matched with LF strings and kept CRLF). |
 | `remote_ls` / `remote_glob` / `remote_grep` | `ls -la`, `rg --files -g`, `rg -n` on the remote. |
 | `local_ls` / `local_read` | Look inside the allowlisted local folders. |
 | `upload` | Copy a local file or folder (allowlist only, guard-checked) to the remote. |
-| `download` | Copy a remote file or folder into an allowlisted local folder. |
+| `download` | Copy a remote file or folder into an allowlisted local folder (never credential-shaped names or files a local tool would execute). |
 | `remote_info` | Host, workdir, connection state, allowed folders, audit location. |
 
 ## What never leaves this machine
@@ -169,6 +169,46 @@ audited the same way. There is no override flag.
 
 The local environment is never forwarded to the remote. Commands run in the
 remote user's own login shell.
+
+## Threat model
+
+FarHand is built so that the model can be *wrong or hostile* and the damage
+stays on the remote. What holds regardless of which model is driving:
+
+- **No local execution.** The only process FarHand ever starts locally is
+  `ssh` to the configured host (plus `ssh -G` to print its address). No
+  model-supplied string reaches a local command line.
+- **Local reads are the allowlist, minus credentials.** `local_ls`,
+  `local_read` and `upload` resolve paths through the allowlist with
+  symlinks followed first, so a link out of the folder is refused. Files the
+  guard would refuse to upload are hidden from `local_ls` and refused by
+  `local_read`: what the model cannot see it cannot re-encode. `/` and the
+  home directory are not accepted as allowed folders.
+- **Downloads cannot plant anything.** Every file a download would create is
+  resolved through the allowlist again (a symlink inside the folder cannot
+  redirect it) and checked by name: nothing credential-shaped, and nothing an
+  editor or agent executes or trusts on opening a folder (`.vscode`, `.idea`,
+  `.git`, `.husky`, `.envrc`, `.claude`, `.farhand.toml`, `CLAUDE.md`, ...).
+  A refused name aborts the whole download before the first byte is written.
+- **Only hosts you have already met.** SSH host keys are checked strictly:
+  a `.farhand.toml` that arrives inside a cloned repository cannot point the
+  agent at a machine you never connected to. Connect once by hand first.
+- **Everything is on record.** Every call, including refusals, is one line
+  in the audit log.
+
+What FarHand does not do: it cannot stop a model that has legitimately read a
+non-secret file in the allowlist from sending it to the remote (that is the
+point of the allowlist), it does not restrict the remote itself (treat the
+remote account as the model's sandbox and give it only what that account
+should have), and it does not disable *other* MCP servers or tools your agent
+has that reach the local machine. Keep secrets out of `allowed_dirs`; the
+guard is a tripwire for accidents, not a substitute for that.
+
+There is deliberately no local `curl`/fetch tool: `curl` reads local files
+(`-d @file`, `file://`) and reaches local-only services (Docker sockets,
+IDE and browser debug ports, `localhost` dashboards), and an approval prompt
+is not a defence against a request that looks harmless. Fetch from the remote
+with `remote_bash` instead; the remote has `curl` too.
 
 ## Audit log
 

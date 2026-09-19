@@ -185,8 +185,9 @@ impl Transfer<'_> {
         Ok(bytes.len() as u64)
     }
 
-    /// Download a remote file or directory into the allowlist. A directory's
-    /// contents land inside `local_path`.
+    /// Download a remote file or directory into the allowlist. A file lands
+    /// at `local_path` (or inside it when that is an existing directory or
+    /// ends with `/`); a directory's contents land inside `local_path`.
     pub async fn download(&self, remote_raw: &str, local_raw: &str) -> Result<TransferReport> {
         let remote_path = self.remote.resolve(remote_raw).await?;
         let local = self.local.resolve_for_write(local_raw)?;
@@ -198,11 +199,12 @@ impl Transfer<'_> {
                 "`{remote_path}` does not exist on the remote"
             ))),
             Some(false) => {
-                let dest = if local.is_dir() {
+                let dest = if local.is_dir() || local_raw.ends_with('/') {
                     local.join(Path::new(&remote_path).file_name().unwrap_or_default())
                 } else {
                     local
                 };
+                let dest = self.local_target(&dest)?;
                 let (bytes, len) = self.remote.read_file(&remote_path, max).await?;
                 if len as usize > max {
                     return Err(Error::Invalid(format!(
@@ -242,16 +244,24 @@ impl Transfer<'_> {
                         self.limits.max_transfer_files
                     )));
                 }
+                // Names come from the remote, so every destination is checked
+                // like a model-supplied path before anything is written:
+                // no `..`, no escaping through a local symlink, nothing an
+                // editor or agent would trust.
+                let mut plan: Vec<(String, PathBuf)> = Vec::with_capacity(files.len());
                 for f in files {
                     let rel = f
                         .strip_prefix(&remote_path)
                         .unwrap_or(&f)
                         .trim_start_matches('/');
-                    if rel.split('/').any(|seg| seg == "..") {
+                    if rel.is_empty() || rel.split('/').any(|seg| seg == "..") {
                         report.skipped.push(f.clone());
                         continue;
                     }
-                    let dest = local.join(rel);
+                    let dest = self.local_target(&local.join(rel))?;
+                    plan.push((f, dest));
+                }
+                for (f, dest) in plan {
                     let (bytes, len) = self.remote.read_file(&f, max).await?;
                     if report.bytes + len > self.limits.max_transfer_bytes {
                         return Err(Error::Invalid("transfer limit exceeded".into()));
@@ -267,6 +277,23 @@ impl Transfer<'_> {
                 Ok(report)
             }
         }
+    }
+}
+
+impl Transfer<'_> {
+    /// Re-check a download destination: it must still resolve inside the
+    /// allowlist (a symlink under the root could point elsewhere) and its
+    /// path relative to that root must pass the guard.
+    fn local_target(&self, dest: &Path) -> Result<PathBuf> {
+        let dest = self.local.resolve_for_write(&dest.to_string_lossy())?;
+        let rel = self
+            .local
+            .roots()
+            .iter()
+            .find_map(|r| dest.strip_prefix(r).ok())
+            .unwrap_or(&dest);
+        self.guard.ensure_download(rel)?;
+        Ok(dest)
     }
 }
 

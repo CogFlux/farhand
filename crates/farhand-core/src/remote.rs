@@ -159,14 +159,20 @@ impl Remote {
             tracing::warn!("ssh session to {} dropped; reconnecting", self.cfg.host);
             *slot = None;
         }
+        // Strict host-key checking: FarHand only talks to hosts the user has
+        // already connected to by hand. A `.farhand.toml` that arrives with a
+        // cloned repository therefore cannot point an agent at a machine the
+        // user never chose.
         let mut builder = SessionBuilder::default();
         builder
             .connect_timeout(Duration::from_secs(self.cfg.connect_timeout_secs))
             .server_alive_interval(Duration::from_secs(self.cfg.server_alive_interval_secs))
-            .known_hosts_check(KnownHosts::Add);
+            .known_hosts_check(KnownHosts::Strict);
         let session = builder.connect_mux(&self.cfg.host).await.map_err(|e| {
             Error::Ssh(format!(
-                "cannot connect to `{}`: {e}. Check that `ssh {}` works from a terminal.",
+                "cannot connect to `{}`: {e}. Check that `ssh {}` works from a terminal; \
+                 FarHand refuses hosts whose key is not yet in known_hosts, so connect once \
+                 by hand first.",
                 self.cfg.host, self.cfg.host
             ))
         })?;
