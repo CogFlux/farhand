@@ -1,9 +1,9 @@
 # FarHand
 
 Gives a coding agent hands on a remote machine and keeps its hands off the
-local one.
+local one. **https://farhand.cogflux.io**
 
-FarHand is an MCP server. Point OpenCode (Claude Code next) at it, and every
+FarHand is an MCP server. Point OpenCode, Claude Code or Codex at it, and every
 command the model runs and every file it reads or writes happens on a remote
 host over your existing SSH setup. The local machine stays closed, with one
 exception you control: a list of local folders the model may look into and

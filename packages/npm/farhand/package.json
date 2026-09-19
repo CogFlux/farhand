@@ -4,7 +4,7 @@
   "description": "Remote hands for coding agents: run OpenCode / Claude Code / Codex work on a remote host over SSH, keep credentials local, audit everything",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/CogFlux/farhand.git" },
-  "homepage": "https://github.com/CogFlux/farhand",
+  "homepage": "https://farhand.cogflux.io",
   "bin": { "farhand": "bin/farhand.js" },
   "files": ["bin/farhand.js", "README.md"],
   "os": ["darwin", "linux"],
