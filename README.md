@@ -81,8 +81,14 @@ host = "devbox"            # an alias from ~/.ssh/config, or user@host
 workdir = "~/proj"         # commands start here; relative paths resolve here
 
 [local]
-allowed_dirs = ["~/FarHand-Outbox"]   # the only local folders the model may see
+allowed_dirs = ["."]       # the only local folders the model may see; "." = this folder
 ```
+
+With `"."` the folder holding `.farhand.toml` is the project's local pocket:
+drop a file in it and the model can `upload` it, and `download` lands there.
+Nothing else lives in that folder — the code is on the remote — so this is
+the natural default. Absolute paths and `~/...` work too; relative entries
+are only accepted in a project `.farhand.toml`, never `..`, `/` or `~`.
 
 Config is found in this order: `--config PATH`, `$FARHAND_CONFIG`,
 `./.farhand.toml`, `~/.config/farhand/config.toml`. The per-project

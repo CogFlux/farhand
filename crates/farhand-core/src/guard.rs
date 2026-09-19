@@ -75,6 +75,7 @@ const DENIED_NAMES: &[&str] = &[
     "kubeconfig",
     "opencode.json",
     "opencode.jsonc",
+    ".farhand.toml",
     ".mcp.json",
     "mcp.json",
     "claude_desktop_config.json",

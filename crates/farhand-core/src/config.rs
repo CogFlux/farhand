@@ -303,7 +303,14 @@ impl Config {
         };
         let text = std::fs::read_to_string(&path)
             .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display())))?;
-        let config = Self::parse(&text)?;
+        // Relative `allowed_dirs` entries are resolved against the file's own
+        // directory, but only for a per-project file: the global config
+        // belongs to no directory, so `"."` would mean nothing there.
+        let base = match source {
+            Source::Global => None,
+            _ => path.parent().map(Path::to_path_buf),
+        };
+        let config = Self::parse_at(&text, base.as_deref())?;
         Ok(Loaded {
             config,
             path,
@@ -311,9 +318,17 @@ impl Config {
         })
     }
 
+    /// Parse a config that belongs to no directory: `allowed_dirs` entries
+    /// must be absolute or `~/...`.
     pub fn parse(text: &str) -> Result<Self> {
+        Self::parse_at(text, None)
+    }
+
+    /// Parse a config file that lives in `base`; relative `allowed_dirs`
+    /// entries (`"."`, `"assets"`) are resolved against it.
+    pub fn parse_at(text: &str, base: Option<&Path>) -> Result<Self> {
         let mut cfg: Config = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
-        cfg.validate()?;
+        cfg.validate(base)?;
         Ok(cfg)
     }
 
@@ -341,7 +356,7 @@ impl Config {
             .join("config.toml")
     }
 
-    fn validate(&mut self) -> Result<()> {
+    fn validate(&mut self, base: Option<&Path>) -> Result<()> {
         if self.remote.host.trim().is_empty() {
             return Err(Error::Config("remote.host is empty".into()));
         }
@@ -370,12 +385,28 @@ impl Config {
         let mut dirs = Vec::with_capacity(self.local.allowed_dirs.len());
         let home = dirs::home_dir();
         for d in &self.local.allowed_dirs {
-            let expanded = expand_home(d);
+            let mut expanded = expand_home(d);
             if !expanded.is_absolute() {
-                return Err(Error::Config(format!(
-                    "local.allowed_dirs entry must be absolute: {}",
-                    d.display()
-                )));
+                // A relative entry names the project folder itself or
+                // something inside it; `..` would let a config that arrived
+                // with a repository reach above its own directory.
+                let Some(base) = base else {
+                    return Err(Error::Config(format!(
+                        "local.allowed_dirs entry `{}` is relative; only a project \
+                         .farhand.toml may use relative entries (`\".\"` for its own folder)",
+                        d.display()
+                    )));
+                };
+                if expanded
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return Err(Error::Config(format!(
+                        "local.allowed_dirs entry `{}` may not contain `..`",
+                        d.display()
+                    )));
+                }
+                expanded = base.join(expanded);
             }
             // The allowlist is for a folder the user set aside, never the
             // whole machine or home: that would hand every non-credential
@@ -476,8 +507,9 @@ workdir = "~/project"
 [local]
 # The only local directories the model may list, read from, upload from or
 # download into. Leave empty to close the local filesystem completely.
-# Never point this at your home directory or a config directory.
-allowed_dirs = ["~/FarHand-Outbox"]
+# In a project .farhand.toml, "." means this folder: drop files here to
+# upload them, and downloads land here. Never allow your home directory.
+allowed_dirs = ["."]
 
 [limits]
 # command_timeout_secs = 120
@@ -512,11 +544,13 @@ mod tests {
 
     #[test]
     fn example_parses() {
-        let cfg = Config::parse(Config::example()).unwrap();
+        // `farhand init` writes the example as a project file; its `"."`
+        // is that file's folder, and is meaningless in the global config.
+        let cfg = Config::parse_at(Config::example(), Some(Path::new("/proj"))).unwrap();
         assert_eq!(cfg.remote.host, "devbox");
         assert_eq!(cfg.remote.shell, vec!["bash", "-lc"]);
-        assert_eq!(cfg.local.allowed_dirs.len(), 1);
-        assert!(cfg.local.allowed_dirs[0].is_absolute());
+        assert_eq!(cfg.local.allowed_dirs, vec![PathBuf::from("/proj")]);
+        assert!(Config::parse(Config::example()).is_err());
     }
 
     #[test]
@@ -532,6 +566,24 @@ mod tests {
             Config::parse("[remote]\nhost='h'\nworkdir='/w'\n[local]\nallowed_dirs=['~/out']")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn relative_allowed_dirs_resolve_against_the_project_file() {
+        let text = "[remote]\nhost='h'\nworkdir='/w'\n[local]\nallowed_dirs=['.', 'assets']";
+        let err = Config::parse(text).unwrap_err();
+        assert!(err.to_string().contains("relative"), "{err}");
+        let cfg = Config::parse_at(text, Some(Path::new("/proj"))).unwrap();
+        assert_eq!(
+            cfg.local.allowed_dirs,
+            vec![PathBuf::from("/proj"), PathBuf::from("/proj/assets")]
+        );
+        let err = Config::parse_at(
+            "[remote]\nhost='h'\nworkdir='/w'\n[local]\nallowed_dirs=['../x']",
+            Some(Path::new("/proj")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
     }
 
     #[test]
