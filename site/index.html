@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FarHand — remote hands for coding agents</title>
+<meta name="description" content="FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto a Linux machine over SSH. The agent works there; your laptop, and your credentials, stay here.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111'/%3E%3Ccircle cx='9' cy='16' r='3' fill='%23fff'/%3E%3Ccircle cx='23' cy='16' r='3' fill='%2334c759'/%3E%3Crect x='11' y='15' width='10' height='2' fill='%23444'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --fg: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #e6e6e3;
+    --card: #ffffff;
+    --accent: #0a84ff;
+    --green: #34c759;
+    --red: #ff3b30;
+    --amber: #ff9f0a;
+    --code-bg: #f1f1ee;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111111;
+      --fg: #ececec;
+      --muted: #9a9a9a;
+      --line: #2a2a2a;
+      --card: #1a1a1a;
+      --code-bg: #1f1f1f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111111;
+    --fg: #ececec;
+    --muted: #9a9a9a;
+    --line: #2a2a2a;
+    --card: #1a1a1a;
+    --code-bg: #1f1f1f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 16px/1.6 var(--sans);
+    color: var(--fg);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; }
+  code, pre { font-family: var(--mono); font-size: 0.92em; }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 20px; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 22px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { font-weight: 600; letter-spacing: -0.01em; }
+  .brand small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  nav a { color: var(--muted); text-decoration: none; margin-left: 20px; font-size: 15px; }
+  nav a:hover { color: var(--fg); }
+  nav { display: flex; align-items: center; }
+  .theme-toggle {
+    margin-left: 20px; width: 32px; height: 32px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card); color: var(--muted);
+    cursor: pointer; font-size: 15px; line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .theme-toggle:hover { color: var(--fg); }
+  .theme-toggle .sun, .theme-toggle .moon { display: none; }
+  :root[data-theme="dark"] .theme-toggle .sun { display: inline; }
+  :root[data-theme="light"] .theme-toggle .moon { display: inline; }
+  :root:not([data-theme]) .theme-toggle .moon { display: inline; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) .theme-toggle .moon { display: none; }
+    :root:not([data-theme]) .theme-toggle .sun { display: inline; }
+  }
+
+  .hero { padding: 72px 0 40px; }
+  h1 { font-size: 44px; line-height: 1.1; letter-spacing: -0.02em; margin: 0 0 16px; font-weight: 700; }
+  .lede { font-size: 20px; color: var(--muted); max-width: 640px; margin: 0 0 32px; }
+
+  /* Agent transcript mock */
+  .term {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.6;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    max-width: 640px;
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+  .term .dim { color: var(--muted); }
+  .term .tool { color: var(--accent); }
+  .term .ok { color: var(--green); }
+  .term .deny { color: var(--red); }
+  .term .you { font-weight: 600; }
+
+  section { padding: 40px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 24px; letter-spacing: -0.01em; margin: 0 0 18px; }
+  h3 { font-size: 17px; margin: 24px 0 8px; }
+  p { margin: 0 0 14px; }
+  .muted { color: var(--muted); }
+  .note { font-size: 14px; color: var(--muted); }
+
+  /* Flow diagram */
+  .flow {
+    display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 10px; align-items: stretch;
+    margin: 22px 0;
+  }
+  .flow .box {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+  }
+  .flow .box b { display: block; margin-bottom: 4px; }
+  .flow .box .muted { font-size: 13px; line-height: 1.45; display: block; }
+  .flow .arrow { align-self: center; color: var(--muted); font-family: var(--mono); font-size: 13px; text-align: center; white-space: nowrap; }
+  .flow .box.here { border-color: var(--fg); }
+  .flow .box.there { border-color: var(--green); }
+
+  .legend { display: grid; grid-template-columns: max-content 1fr; gap: 8px 20px; margin: 18px 0; }
+  .legend code { align-self: start; padding: 2px 8px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin: 20px 0;
+  }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 18px 0; }
+  .cards .card { margin: 0; }
+  .cards .card h3 { margin: 0 0 8px; }
+  .cards .card p { font-size: 14px; color: var(--muted); margin: 0 0 8px; }
+  .cards .card pre { margin: 10px 0 0; padding: 10px 12px; font-size: 13px; }
+
+  table { border-collapse: collapse; width: 100%; margin: 12px 0 18px; font-size: 15px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  td code { white-space: nowrap; }
+
+  ul { padding-left: 22px; margin: 0 0 14px; }
+  li { margin: 4px 0; }
+
+  .cta {
+    display: inline-block; padding: 10px 18px; border-radius: 8px;
+    background: var(--fg); color: var(--bg); text-decoration: none; font-weight: 600;
+  }
+  .tabs { display: flex; gap: 6px; margin: 14px 0 0; flex-wrap: wrap; }
+  .tabs button {
+    font: 500 14px var(--sans); color: var(--muted); background: none; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: var(--fg); border-color: var(--fg); }
+  .panel { display: none; }
+  .panel[data-active] { display: block; }
+  .panel pre { margin-top: 10px; }
+
+  footer { padding: 36px 0 60px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
+  footer a { text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  @media (max-width: 700px) {
+    h1 { font-size: 34px; }
+    .lede { font-size: 18px; }
+    .flow { grid-template-columns: 1fr; }
+    .flow .arrow { transform: rotate(90deg); padding: 6px 0; }
+    .cards { grid-template-columns: 1fr; }
+    .legend { grid-template-columns: 1fr; gap: 4px; }
+    nav a { margin-left: 14px; }
+  }
+</style>
+<script>
+  try {
+    var t = localStorage.getItem("theme");
+    if (t === "dark" || t === "light") document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">FarHand <small>by Cogflux</small></div>
+    <nav>
+      <a href="#how">How</a>
+      <a href="#guard">Guard</a>
+      <a href="#agents">Agents</a>
+      <a href="#get">Install</a>
+      <a href="https://github.com/CogFlux/farhand">GitHub</a>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><span class="sun">☀</span><span class="moon">☾</span></button>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>Remote hands for coding agents.</h1>
+    <p class="lede">FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto a Linux machine over SSH. The agent works there. Your laptop — and every credential on it — stays here.</p>
+    <div class="term" aria-label="Agent transcript example"><span class="you">› run the tests</span>
+<span class="tool">⚙ farhand_remote_bash</span> <span class="dim">[command=cargo test]</span>  <span class="dim">→ devbox:~/myapp</span>
+<span class="ok">test result: ok. 48 passed</span>
+
+<span class="you">› upload the assets folder</span>
+<span class="tool">⚙ farhand_upload</span> <span class="dim">[local=~/FarHand-Outbox/assets → ~/myapp/assets]</span>
+<span class="ok">Uploaded 23 files, 1.4 MB</span>
+
+<span class="you">› and the .env</span>
+<span class="tool">⚙ farhand_upload</span> <span class="dim">[local=~/FarHand-Outbox/.env]</span>
+<span class="deny">denied: `.env` looks like credential material (rule: denied-filename). FarHand never uploads credentials.</span></div>
+  </div>
+
+  <section id="why">
+    <h2>Why not just run the agent on the server?</h2>
+    <p>Because then the agent's own configuration lives there: API keys, OAuth tokens, MCP secrets, editor state. Anyone with access to the server has your accounts. Running the agent locally keeps that material on a machine you control and lets you keep using the client you already have — Claude Code's terminal, OpenCode's TUI, Codex — while the work itself happens elsewhere.</p>
+    <p>FarHand is an MCP server. It takes the agent's local <code>bash</code>, <code>read</code>, <code>write</code>, <code>edit</code>, <code>glob</code> and <code>grep</code> away and hands back the same tools pointed at the remote, over your existing <code>ssh</code> setup. One binary, one config file per project, no agent on the server.</p>
+  </section>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <div class="flow" aria-label="Data flow">
+      <div class="box here"><b>Your machine</b><span class="muted">The agent, its credentials, and one allowlisted folder the model may look into. Nothing else is reachable.</span></div>
+      <div class="arrow">MCP (stdio)<br>→</div>
+      <div class="box here"><b>farhand</b><span class="muted">Secret guard, local allowlist, approval, audit log. Never forwards your environment.</span></div>
+      <div class="arrow">ssh + sftp<br>→</div>
+      <div class="box there"><b>Remote</b><span class="muted">Commands run in the remote user's login shell, in the configured workdir. Plain Linux; nothing to install.</span></div>
+    </div>
+    <p>Each project is a folder on your machine with a <code>.farhand.toml</code> that names the host and the remote working directory. Open the agent there and it is remote; open it anywhere else and it is an ordinary local session. Prompts like "list the files" or "run the tests" mean the remote workdir — the model is told so, and the local tools are disabled, not merely discouraged.</p>
+<pre><code>[remote]
+host = "devbox"            # an alias from ~/.ssh/config
+workdir = "~/myapp"        # where commands start
+
+[local]
+allowed_dirs = ["."]       # the only local folder the model may see
+
+[approval]
+mode = "ask"               # ask | auto | strict</code></pre>
+    <div class="legend">
+      <code>ask</code><span>Mutating tools — <code>remote_bash</code>, <code>remote_write</code>, <code>remote_edit</code>, <code>upload</code>, <code>download</code> — need your approval in the agent's own prompt; reads run freely.</span>
+      <code>auto</code><span>Everything runs. For a throwaway box or a scripted session.</span>
+      <code>strict</code><span>Every call, including reads, asks first.</span>
+    </div>
+  </section>
+
+  <section id="guard">
+    <h2>What never leaves your machine</h2>
+    <p>Every byte headed for the remote — command text, file content, edits, uploads — passes the secret guard first. A refusal names the rule, never the matched text, and there is no override flag.</p>
+    <table>
+      <tr><th>By path</th><th>By content</th></tr>
+      <tr>
+        <td><code>.env*</code>, <code>*.pem</code>, <code>*.key</code>, <code>id_*</code>, <code>.netrc</code>, <code>.npmrc</code>, <code>credentials*</code>, <code>*service-account*.json</code>, <code>*.tfstate</code>, agent configs (<code>opencode.json*</code>, <code>.mcp.json</code>, <code>.farhand.toml</code>), anything under <code>.ssh</code>, <code>.aws</code>, <code>.gnupg</code>, <code>.kube</code>, <code>.config</code>, <code>.claude</code>, <code>.opencode</code>, <code>.codex</code>, …</td>
+        <td>Private-key blocks, <code>sk-…</code>, <code>ghp_…</code> / <code>github_pat_…</code>, <code>AKIA…</code>, <code>AIza…</code>, <code>xox…</code>, Stripe keys, JWTs, <code>Authorization: Bearer …</code>, URLs with embedded passwords, and <code>api_key = "&lt;24+ random chars&gt;"</code> style assignments.</td>
+      </tr>
+    </table>
+    <h3>The local side is closed</h3>
+    <ul>
+      <li>The only process FarHand starts locally is <code>ssh</code> to the configured host. No model-supplied string reaches a local command line, and there is deliberately no local <code>curl</code>.</li>
+      <li>Local reads are the allowlist minus credentials: symlinks are followed before the containment check, and files the guard would refuse to upload are hidden from the model entirely.</li>
+      <li>Downloads cannot plant anything an editor or agent executes on opening a folder — <code>.vscode</code>, <code>.git</code>, <code>.husky</code>, <code>.claude</code>, <code>CLAUDE.md</code>, <code>.farhand.toml</code> — nor credential-shaped names. One refused name aborts the whole download before a byte is written.</li>
+      <li>Host keys are checked strictly. A <code>.farhand.toml</code> inside a cloned repository cannot point the agent at a machine you never connected to.</li>
+      <li>Your local environment is never forwarded. Every call, including refusals, is one line in <code>~/.local/share/farhand/audit/</code>.</li>
+    </ul>
+    <p class="note">The remote is the model's sandbox: give that account only what it should have. The guard is a tripwire against accidents, not a substitute for keeping secrets out of the allowlisted folder.</p>
+  </section>
+
+  <section id="tools">
+    <h2>Tools the agent gets</h2>
+    <table>
+      <tr><th>Tool</th><th>What it does</th></tr>
+      <tr><td><code>remote_bash</code></td><td>Run a command on the remote. Bounded output, remote <code>timeout</code>, local watchdog.</td></tr>
+      <tr><td><code>remote_read</code></td><td>Read a remote file with line numbers; <code>offset</code>/<code>limit</code> page through it.</td></tr>
+      <tr><td><code>remote_write</code> / <code>remote_edit</code></td><td>Create or overwrite a file; replace an exact, unique string. CRLF files stay CRLF.</td></tr>
+      <tr><td><code>remote_ls</code> / <code>remote_glob</code> / <code>remote_grep</code></td><td><code>ls -la</code>, <code>rg --files -g</code>, <code>rg -n</code> on the remote (falls back to <code>find</code>/<code>grep</code>).</td></tr>
+      <tr><td><code>local_ls</code> / <code>local_read</code></td><td>Look inside the allowlisted local folder, and only there.</td></tr>
+      <tr><td><code>upload</code> / <code>download</code></td><td>Move files between that folder and the remote, guard-checked in both directions.</td></tr>
+      <tr><td><code>remote_info</code></td><td>Host, workdir, connection state, allowed folders, audit location.</td></tr>
+    </table>
+  </section>
+
+  <section id="agents">
+    <h2>One server, three agents</h2>
+    <p><code>farhand install &lt;agent&gt;</code> writes the agent's own configuration: the MCP server, the fence that disables its local tools, and the translation of FarHand's approval modes into the agent's permission system.</p>
+    <div class="cards">
+      <div class="card">
+        <h3>OpenCode</h3>
+        <p>A plugin that adds the MCP server per project, disables the built-in tools, maps <code>ask</code>/<code>auto</code> onto OpenCode permissions and shows a toast if the config is broken.</p>
+<pre><code>farhand install opencode</code></pre>
+      </div>
+      <div class="card">
+        <h3>Claude Code</h3>
+        <p>MCP server plus a <code>PreToolUse</code> hook that denies <code>Bash</code>, <code>Edit</code>, <code>Read</code>… in remote projects and applies your approval mode to FarHand's tools.</p>
+<pre><code>farhand install claude-code</code></pre>
+      </div>
+      <div class="card">
+        <h3>Codex CLI</h3>
+        <p>An <code>[mcp_servers.farhand]</code> entry with per-tool approval modes; at project scope the built-in shell is turned off and the sandbox set read-only.</p>
+<pre><code>farhand install codex</code></pre>
+      </div>
+    </div>
+    <p class="note">Anything else that speaks MCP over stdio works with <code>farhand serve --config /path/to/.farhand.toml</code>.</p>
+  </section>
+
+  <section id="get">
+    <h2>Install</h2>
+    <p>One static binary for macOS and Linux (Apple Silicon, Intel, x86_64, aarch64). The remote needs nothing beyond a standard shell and SFTP; <code>ripgrep</code> there makes search faster.</p>
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="sh">curl | sh</button>
+      <button role="tab" aria-selected="false" data-tab="npm">npm</button>
+      <button role="tab" aria-selected="false" data-tab="cargo">cargo</button>
+      <button role="tab" aria-selected="false" data-tab="src">from source</button>
+    </div>
+    <div class="panel" data-tab="sh" data-active>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/CogFlux/farhand/main/install.sh | sh</code></pre>
+      <p class="note">Downloads the release for your platform into <code>~/.local/bin</code> and verifies its SHA-256. <code>FARHAND_BIN_DIR</code> changes the location.</p>
+    </div>
+    <div class="panel" data-tab="npm">
+<pre><code>npm i -g farhand        # or: npx farhand ...</code></pre>
+      <p class="note">A dependency-free wrapper that fetches the matching release binary on first run.</p>
+    </div>
+    <div class="panel" data-tab="cargo">
+<pre><code>cargo binstall farhand   # prebuilt
+cargo install farhand    # builds from crates.io</code></pre>
+    </div>
+    <div class="panel" data-tab="src">
+<pre><code>git clone https://github.com/CogFlux/farhand.git &amp;&amp; cd farhand
+cargo install --path crates/farhand --locked</code></pre>
+    </div>
+    <h3>Then</h3>
+<pre><code>farhand install opencode          # or claude-code / codex
+cd ~/projects/myapp-remote        # a folder for this remote project
+farhand init &gt; .farhand.toml      # edit host and workdir
+farhand check                     # connects once, prints what the model will be told</code></pre>
+    <p><a class="cta" href="https://github.com/CogFlux/farhand">Source and docs on GitHub</a> &nbsp; <span class="note"><a href="https://github.com/CogFlux/farhand/releases">Releases</a> · MIT license</span></p>
+  </section>
+
+  <footer>
+    <div>FarHand is part of <a href="https://cogflux.io">Cogflux</a>. Not affiliated with Anthropic, OpenAI or the OpenCode project.</div>
+  </footer>
+</div>
+<script>
+  document.getElementById("theme-toggle").addEventListener("click", function () {
+    var root = document.documentElement;
+    var systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var current = root.dataset.theme || (systemDark ? "dark" : "light");
+    var next = current === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("theme", next); } catch (e) {}
+  });
+  document.querySelectorAll(".tabs button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var tab = b.dataset.tab;
+      document.querySelectorAll(".tabs button").forEach(function (x) { x.setAttribute("aria-selected", x === b ? "true" : "false"); });
+      document.querySelectorAll(".panel").forEach(function (p) {
+        if (p.dataset.tab === tab) p.setAttribute("data-active", ""); else p.removeAttribute("data-active");
+      });
+    });
+  });
+</script>
+</body>
+</html>
