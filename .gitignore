@@ -1,0 +1,5 @@
+/target
+/plugins/opencode/node_modules
+.DS_Store
+# per-project remote binding: host alias + workdir, keep it out of the repo
+.farhand.toml

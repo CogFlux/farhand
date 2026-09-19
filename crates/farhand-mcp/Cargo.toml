@@ -1,0 +1,25 @@
+[package]
+name = "farhand-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "farhand"
+path = "src/main.rs"
+
+[dependencies]
+farhand-core = { path = "../farhand-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+schemars.workspace = true
+rmcp.workspace = true
+toml_edit.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
