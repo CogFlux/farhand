@@ -233,6 +233,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "farhand"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "farhand-core",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "farhand-core"
 version = "0.1.0"
 dependencies = [
@@ -253,24 +271,6 @@ dependencies = [
  "toml",
  "tracing",
  "walkdir",
-]
-
-[[package]]
-name = "farhand-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "farhand-core",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml_edit",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

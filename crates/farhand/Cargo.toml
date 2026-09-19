@@ -1,21 +1,26 @@
 [package]
-name = "farhand-mcp"
+name = "farhand"
+description = "Remote hands for coding agents: run OpenCode / Claude Code / Codex work on a remote host over SSH, keep credentials local, audit everything"
+readme = "../../README.md"
+keywords = ["mcp", "ssh", "agents", "opencode", "claude-code"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "farhand"
 path = "src/main.rs"
 
-# `cargo binstall farhand-mcp` fetches the release asset instead of building.
+# `cargo binstall farhand` fetches the release asset instead of building.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/farhand-{ version }-{ target }{ archive-suffix }"
 bin-dir = "farhand-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [dependencies]
-farhand-core = { path = "../farhand-core" }
+farhand-core = { path = "../farhand-core", version = "0.1.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

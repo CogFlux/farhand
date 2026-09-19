@@ -3,6 +3,9 @@ name = "farhand-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "FarHand core: config, secret guard, local allowlist, SSH/SFTP remote, transfers and audit log"
+readme = "../../README.md"
+repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true

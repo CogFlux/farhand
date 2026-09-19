@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/farhand-core", "crates/farhand-mcp"]
+members = ["crates/farhand-core", "crates/farhand"]
 
 [workspace.package]
 version = "0.1.0"

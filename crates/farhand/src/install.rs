@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 
 use crate::hook::CLAUDE_LOCAL_TOOLS;
 
-const OPENCODE_PLUGIN: &str = include_str!("../../../plugins/opencode/farhand.ts");
+const OPENCODE_PLUGIN: &str = include_str!("../plugins/opencode/farhand.ts");
 const PLUGIN_BIN_PLACEHOLDER: &str = "const BUILT_IN_BIN = \"farhand\"";
 const PLUGIN_CONFIG_PLACEHOLDER: &str = "const BUILT_IN_CONFIG: string | undefined = undefined";
 const HOOK_MARKER: &str = "hook claude-code";

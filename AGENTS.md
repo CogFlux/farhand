@@ -22,7 +22,7 @@ cargo test --all
 - The local environment is never forwarded to the remote.
 - Every tool call writes one audit record, including refusals. File contents
   and guard-matched text are never logged.
-- `farhand-core` has no MCP dependency; `farhand-mcp` has no SSH dependency.
+- `farhand-core` has no MCP dependency; `farhand` has no SSH dependency.
 
 ## Git
 

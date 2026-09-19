@@ -32,7 +32,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked --target ${{ matrix.target }} -p farhand-mcp
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p farhand
       - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"

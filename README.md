@@ -50,9 +50,9 @@ curl -fsSL https://raw.githubusercontent.com/CogFlux/farhand/main/install.sh | s
 
 Or download `farhand-<version>-<target>.tar.gz` from the
 [releases page](https://github.com/CogFlux/farhand/releases) yourself, or
-`cargo binstall farhand-mcp`.
+`cargo binstall farhand`.
 
-**From source** (Rust stable): `cargo install --path crates/farhand-mcp`
+**From source** (Rust stable): `cargo install --path crates/farhand`
 puts `farhand` in `~/.cargo/bin`; or `cargo build --release` and point
 `FARHAND_BIN` at `target/release/farhand`.
 
@@ -181,8 +181,9 @@ are never logged, and a command the guard refused is logged as redacted.
 
 ```
 crates/farhand-core   config, guard, local allowlist, remote (ssh + sftp), transfer, audit
-crates/farhand-mcp    the `farhand` binary: MCP tools over stdio
-plugins/opencode      the OpenCode entry point
+crates/farhand    the `farhand` binary: MCP tools over stdio
+crates/farhand/plugins/opencode   the OpenCode entry point (embedded in the binary)
+packages/npm/farhand  the npm wrapper (`npx farhand`), fetches the release binary
 ```
 
 ## Claude Code
