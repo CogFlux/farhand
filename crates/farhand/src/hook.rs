@@ -57,7 +57,7 @@ fn decision(kind: &str, reason: &str) -> String {
 /// Which FarHand tool replaces a given Claude Code local tool.
 fn replacement(tool: &str) -> &'static str {
     match tool {
-        "Bash" => "mcp__farhand__remote_bash",
+        "Bash" => "mcp__farhand__remote_shell",
         "Edit" | "MultiEdit" | "NotebookEdit" => "mcp__farhand__remote_edit",
         "Write" => "mcp__farhand__remote_write",
         "Read" => "mcp__farhand__remote_read",
@@ -163,13 +163,13 @@ mod tests {
         assert!(v.unwrap()["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap()
-            .contains("mcp__farhand__remote_bash"));
+            .contains("mcp__farhand__remote_shell"));
     }
 
     #[test]
     fn farhand_tools_follow_approval() {
         let d = cfg_dir("mode='ask'\ntools={ remote_write='auto' }");
-        assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_bash")), "ask");
+        assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_shell")), "ask");
         assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_write")), "allow");
         assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_read")), "allow");
         let strict = cfg_dir("mode='strict'");
@@ -212,7 +212,7 @@ mod tests {
         let prev = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", home.path());
         let r = call(d.path(), "Bash");
-        let r2 = call(d.path(), "mcp__farhand__remote_bash");
+        let r2 = call(d.path(), "mcp__farhand__remote_shell");
         match prev {
             Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
@@ -225,6 +225,6 @@ mod tests {
     fn broken_config_asks() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(".farhand.toml"), "nonsense = [").unwrap();
-        assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_bash")), "ask");
+        assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_shell")), "ask");
     }
 }

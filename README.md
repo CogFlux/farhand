@@ -18,7 +18,7 @@ and everything that happens is written to a local audit log.
                        farhand (one binary)
         ┌──────────────────┼───────────────────┐
    remote tools       local tools          audit log
-   remote_bash        local_ls / local_read     one JSON line per action
+   remote_shell        local_ls / local_read     one JSON line per action
    remote_read/write  upload / download
    remote_edit/ls     (allowlisted folders only)
    remote_glob/grep
@@ -123,7 +123,7 @@ refuses them again at call time as a second fence, and tells the model in the
 system prompt that it is working remotely.
 
 Approval is FarHand's knob, not the agent's: `[approval] mode = "ask"`
-(default) makes the agent prompt before `remote_bash`, `remote_write`,
+(default) makes the agent prompt before `remote_shell`, `remote_write`,
 `remote_edit`, `upload` and `download` and lets read-only tools run;
 `"auto"` prompts for nothing, with the audit log as the record; `"strict"`
 prompts for everything, reads included; `tools = { remote_write = "auto" }`
@@ -139,18 +139,18 @@ Without the plugin, the same effect comes from `opencode.jsonc`:
   },
   "tools": { "bash": false, "read": false, "write": false, "edit": false,
              "glob": false, "grep": false, "list": false, "patch": false },
-  "permission": { "farhand_remote_bash": "ask", "farhand_remote_write": "ask",
+  "permission": { "farhand_remote_shell": "ask", "farhand_remote_write": "ask",
                   "farhand_remote_edit": "ask", "farhand_upload": "ask", "farhand_download": "ask" }
 }
 ```
 
-The tools then appear as `farhand_remote_bash`, `farhand_upload`, and so on.
+The tools then appear as `farhand_remote_shell`, `farhand_upload`, and so on.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `remote_bash` | Run a command on the remote in its own shell — POSIX shell, or PowerShell on Windows (bounded output, remote timeout, local watchdog). |
+| `remote_shell` | Run a command on the remote in its own shell — POSIX shell, or PowerShell on Windows (bounded output, remote timeout, local watchdog). |
 | `remote_read` | Read a remote file with line numbers; `offset`/`limit` page through it. |
 | `remote_write` | Create or overwrite a remote file; parents are created. |
 | `remote_edit` | Replace an exact, unique string in a remote file (`replace_all` optional; CRLF files are matched with LF strings and kept CRLF). |
@@ -220,7 +220,7 @@ There is deliberately no local `curl`/fetch tool: `curl` reads local files
 (`-d @file`, `file://`) and reaches local-only services (Docker sockets,
 IDE and browser debug ports, `localhost` dashboards), and an approval prompt
 is not a defence against a request that looks harmless. Fetch from the remote
-with `remote_bash` instead; the remote has `curl` too.
+with `remote_shell` instead; the remote has `curl` too.
 
 ## Audit log
 

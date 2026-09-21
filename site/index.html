@@ -208,7 +208,7 @@
     <h1>Remote hands for coding agents.</h1>
     <p class="lede">FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto another machine over SSH — Linux, macOS or Windows. The agent works there. Your laptop — and every credential on it — stays here.</p>
     <div class="term" aria-label="Agent transcript example"><span class="you">› run the tests</span>
-<span class="tool">⚙ farhand_remote_bash</span> <span class="dim">[command=cargo test]</span>  <span class="dim">→ devbox:~/myapp</span>
+<span class="tool">⚙ farhand_remote_shell</span> <span class="dim">[command=cargo test]</span>  <span class="dim">→ devbox:~/myapp</span>
 <span class="ok">test result: ok. 48 passed</span>
 
 <span class="you">› upload the assets folder</span>
@@ -246,7 +246,7 @@ allowed_dirs = ["."]       # the only local folder the model may see
 [approval]
 mode = "ask"               # ask | auto | strict</code></pre>
     <div class="legend">
-      <code>ask</code><span>Mutating tools — <code>remote_bash</code>, <code>remote_write</code>, <code>remote_edit</code>, <code>upload</code>, <code>download</code> — need your approval in the agent's own prompt; reads run freely.</span>
+      <code>ask</code><span>Mutating tools — <code>remote_shell</code>, <code>remote_write</code>, <code>remote_edit</code>, <code>upload</code>, <code>download</code> — need your approval in the agent's own prompt; reads run freely.</span>
       <code>auto</code><span>Everything runs. For a throwaway box or a scripted session.</span>
       <code>strict</code><span>Every call, including reads, asks first.</span>
     </div>
@@ -277,7 +277,7 @@ mode = "ask"               # ask | auto | strict</code></pre>
     <h2>Tools the agent gets</h2>
     <table>
       <tr><th>Tool</th><th>What it does</th></tr>
-      <tr><td><code>remote_bash</code></td><td>Run a command on the remote. Bounded output, remote <code>timeout</code>, local watchdog.</td></tr>
+      <tr><td><code>remote_shell</code></td><td>Run a command on the remote. Bounded output, remote <code>timeout</code>, local watchdog.</td></tr>
       <tr><td><code>remote_read</code></td><td>Read a remote file with line numbers; <code>offset</code>/<code>limit</code> page through it.</td></tr>
       <tr><td><code>remote_write</code> / <code>remote_edit</code></td><td>Create or overwrite a file; replace an exact, unique string. CRLF files stay CRLF.</td></tr>
       <tr><td><code>remote_ls</code> / <code>remote_glob</code> / <code>remote_grep</code></td><td><code>ls -la</code>, <code>rg --files -g</code>, <code>rg -n</code> on the remote (falls back to <code>find</code>/<code>grep</code>).</td></tr>

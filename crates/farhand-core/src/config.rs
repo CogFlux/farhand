@@ -239,7 +239,7 @@ impl ApprovalMode {
 
 /// The tools that change something on the remote or in the outbox.
 pub const MUTATING_TOOLS: &[&str] = &[
-    "remote_bash",
+    "remote_shell",
     "remote_write",
     "remote_edit",
     "upload",
@@ -459,6 +459,14 @@ impl Config {
         if let Some(d) = &self.audit.log_dir {
             self.audit.log_dir = Some(expand_home(d));
         }
+        // `remote_bash` was the tool's name before 0.2.1; keep old configs
+        // working.
+        if let Some(m) = self.approval.tools.remove("remote_bash") {
+            self.approval
+                .tools
+                .entry("remote_shell".into())
+                .or_insert(m);
+        }
         for (t, m) in &self.approval.tools {
             if !MUTATING_TOOLS.contains(&t.as_str()) && !READ_ONLY_TOOLS.contains(&t.as_str()) {
                 return Err(Error::Config(format!(
@@ -574,7 +582,7 @@ allowed_dirs = ["."]
 # deny_content = ["ACME-[0-9]{12}"]
 
 [approval]
-# "ask":    the agent prompts you before remote_bash, remote_write,
+# "ask":    the agent prompts you before remote_shell, remote_write,
 #           remote_edit, upload and download; read-only tools run freely.
 # "auto":   nothing prompts; the audit log is your record.
 # "strict": every tool prompts, reads and searches included.
@@ -632,6 +640,15 @@ mod tests {
     }
 
     #[test]
+    fn remote_bash_is_an_alias_for_remote_shell() {
+        let cfg = Config::parse(
+            "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'\ntools={ remote_bash='ask' }",
+        )
+        .unwrap();
+        assert_eq!(cfg.approval.effective()["remote_shell"], ApprovalMode::Ask);
+    }
+
+    #[test]
     fn rejects_relative_workdir() {
         let err = Config::parse("[remote]\nhost='h'\nworkdir='rel'").unwrap_err();
         assert!(err.to_string().contains("absolute"));
@@ -653,11 +670,11 @@ mod tests {
     #[test]
     fn approval_overrides_apply() {
         let cfg = Config::parse(
-            "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'\ntools={ remote_bash='ask' }",
+            "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'\ntools={ remote_shell='ask' }",
         )
         .unwrap();
         let e = cfg.approval.effective();
-        assert_eq!(e["remote_bash"], ApprovalMode::Ask);
+        assert_eq!(e["remote_shell"], ApprovalMode::Ask);
         assert_eq!(e["remote_write"], ApprovalMode::Auto);
         assert_eq!(e["remote_read"], ApprovalMode::Auto);
         assert_eq!(e.len(), MUTATING_TOOLS.len() + READ_ONLY_TOOLS.len());
@@ -668,7 +685,7 @@ mod tests {
         .unwrap();
         let e = strict.approval.effective();
         assert_eq!(e["remote_read"], ApprovalMode::Ask);
-        assert_eq!(e["remote_bash"], ApprovalMode::Ask);
+        assert_eq!(e["remote_shell"], ApprovalMode::Ask);
         assert_eq!(e["remote_info"], ApprovalMode::Auto);
 
         let default = Config::parse("[remote]\nhost='h'\nworkdir='/'").unwrap();

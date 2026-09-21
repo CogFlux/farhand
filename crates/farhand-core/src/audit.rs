@@ -129,7 +129,7 @@ mod tests {
     fn writes_one_line_per_record() {
         let tmp = tempfile::tempdir().unwrap();
         let audit = Audit::open(tmp.path().join("audit"), "devbox").unwrap();
-        let mut r = Record::new("remote_bash");
+        let mut r = Record::new("remote_shell");
         r.command = Some("ls");
         r.exit_code = Some(0);
         audit.record(r);

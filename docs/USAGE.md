@@ -97,7 +97,7 @@ Start the agent in any local directory. What the model gets:
 
 | It wants to | It calls | You see in the audit log |
 |---|---|---|
-| run a command | `remote_bash` | command, exit code, duration |
+| run a command | `remote_shell` | command, exit code, duration |
 | read / write / edit a file | `remote_read` / `remote_write` / `remote_edit` | path, bytes |
 | find files / search text | `remote_glob` / `remote_grep` | pattern |
 | look at your local outbox | `local_ls` / `local_read` | path |
@@ -149,7 +149,7 @@ agent to one remote without a global `activation = "always"`. Without it
 | second fence | plugin `tool.execute.before` | `PreToolUse` hook → `farhand hook claude-code` | none |
 | `[approval]` | translated at startup | answered by the hook per call | `tools.<t>.approval_mode`, translated at install |
 | honours `activation` | yes | yes (hook) | serve offers no tools when inactive |
-| tools appear as | `farhand_remote_bash` | `mcp__farhand__remote_bash` | `farhand.remote_bash` |
+| tools appear as | `farhand_remote_shell` | `mcp__farhand__remote_shell` | `farhand.remote_shell` |
 
 **User scope vs project scope.** User scope (`--scope user`, the default)
 never writes a static "local tools off" rule; it relies on the dynamic

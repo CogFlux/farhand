@@ -175,7 +175,7 @@ fn install_opencode(opts: &Options) -> Result<()> {
     }
     std::fs::write(&path, content)?;
     println!("opencode: wrote plugin to {}", path.display());
-    println!("opencode: restart OpenCode; tools appear as farhand_remote_bash etc.");
+    println!("opencode: restart OpenCode; tools appear as farhand_remote_shell etc.");
     Ok(())
 }
 

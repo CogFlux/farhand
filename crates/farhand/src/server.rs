@@ -217,14 +217,14 @@ impl FarHand {
         let addr = self.inner().remote.address();
         let platform_note = match self.inner().remote.configured_platform() {
             Some(Platform::Windows) => {
-                "The remote runs WINDOWS: remote_bash runs PowerShell (not bash), so write \
+                "The remote runs WINDOWS: remote_shell runs PowerShell (not bash), so write \
                  PowerShell — Get-ChildItem, Select-String, `cmd /c` for batch commands — and \
                  paths look like C:\\Users\\me\\proj (forward slashes are accepted too). Do \
                  not call `exit` inside a command; output printed before it is lost. "
             }
             Some(Platform::Posix) => "",
             None => {
-                "remote_bash runs the remote's own shell: a POSIX shell on Linux/macOS, \
+                "remote_shell runs the remote's own shell: a POSIX shell on Linux/macOS, \
                  PowerShell on Windows; remote_info reports which once connected. "
             }
         };
@@ -239,9 +239,9 @@ impl FarHand {
              When the user says \"the current directory\", \"here\", \"this project\", \"list the \
              files\", \"run the tests\" or gives a relative path, they mean that remote workdir — \
              never the local machine. Use remote_ls, remote_read, remote_glob, remote_grep, \
-             remote_bash, remote_write and remote_edit for everything unless the user explicitly \
+             remote_shell, remote_write and remote_edit for everything unless the user explicitly \
              says local; they replace the local shell and file tools, which are disabled. \
-             remote_bash already runs on the remote: never ssh or scp from inside it to reach \
+             remote_shell already runs on the remote: never ssh or scp from inside it to reach \
              the same host or the user's machine. \
              The local machine is closed except for these directories: {dirs}. Use local_ls and \
              local_read only when the user explicitly asks about those local folders, `upload` to \
@@ -276,15 +276,15 @@ impl FarHand {
     // ---- remote tools ----
 
     #[tool(
-        name = "remote_bash",
+        name = "remote_shell",
         description = "Run a command ON THE REMOTE HOST in its own shell (POSIX shell on Linux/macOS, PowerShell on Windows). You are already there: do not ssh/scp/rsync to the same host or to the user's machine from inside it — use remote_read/remote_write to touch remote files and upload/download to cross to the local allowlist. Returns stdout, stderr and the exit code. Output is bounded; narrow it with head/tail/grep (Select-Object/Select-String on Windows). Runs in the remote workdir unless cwd is given."
     )]
-    async fn remote_bash(
+    async fn remote_shell(
         &self,
         Parameters(a): Parameters<BashArgs>,
     ) -> Result<CallToolResult, McpError> {
         let started = Instant::now();
-        let mut rec = Record::new("remote_bash");
+        let mut rec = Record::new("remote_shell");
         rec.command = Some(&a.command);
         if let Err(e) = self
             .inner()
@@ -394,7 +394,7 @@ impl FarHand {
             return Ok(self.fail(
                 rec,
                 started,
-                Error::Invalid(format!("file is {len} bytes, above the {max}-byte edit limit; use remote_bash with sed or a script")),
+                Error::Invalid(format!("file is {len} bytes, above the {max}-byte edit limit; use remote_shell with sed or a script")),
             ));
         }
         let text = match String::from_utf8(bytes) {
@@ -777,7 +777,7 @@ impl FarHand {
         let addr = self.inner().remote.address();
         let (os, shell) = match self.inner().remote.platform().await {
             Ok(Platform::Windows) => (
-                "windows (remote_bash runs PowerShell; write PowerShell, not bash)".to_string(),
+                "windows (remote_shell runs PowerShell; write PowerShell, not bash)".to_string(),
                 "PowerShell".to_string(),
             ),
             Ok(Platform::Posix) => ("posix".to_string(), c.remote.shell.join(" ")),
