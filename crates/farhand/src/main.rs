@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! farhand serve [--config PATH]               run the MCP server (what agents launch)
-//! farhand check [--config PATH]               connect once and report what would happen
+//! farhand check [--config PATH]               connect once; show the setup and what the model is told
 //! farhand validate [--config PATH] [--cwd DIR] [--json]   parse the config only; no network
 //! farhand init                                print a configuration template
 //! farhand install <agent> [--scope user|project] [--config PATH]
@@ -172,26 +172,56 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        // A diagnostic for the user: does the config load, does the host
+        // answer, what did it turn out to be, and what exactly will the
+        // model be told. That last part is the MCP `instructions` text
+        // verbatim; when the model misreads the setup, this is where to
+        // look.
         "check" => {
             let l = Config::load_in(args.cwd.as_deref(), args.config.as_deref())?;
-            eprintln!("config: {} (active here: {})", l.path.display(), l.active());
+            let cfg = l.config.clone();
+            println!(
+                "config:     {} (active here: {})",
+                l.path.display(),
+                l.active()
+            );
             let server = FarHand::new(l.config, true)?;
             server.preflight().await?;
-            match server.detected_platform().await {
-                Ok((platform, configured)) => {
-                    eprintln!("connected to remote ({} platform)", platform.name());
-                    if configured.is_none() {
-                        eprintln!(
-                            "hint: add `os = \"{}\"` under [remote] so the model is told which \
-                             shell it is writing for before the first command",
-                            platform.name()
-                        );
-                    }
+            let (platform, configured) = server.detected_platform().await?;
+            println!(
+                "remote:     {} — connected, {} platform",
+                cfg.remote.host,
+                platform.name()
+            );
+            println!("workdir:    {}", cfg.remote.workdir);
+            println!(
+                "approval:   {}",
+                format!("{:?}", cfg.approval.mode).to_lowercase()
+            );
+            println!(
+                "local dirs: {}",
+                if cfg.local.allowed_dirs.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    cfg.local
+                        .allowed_dirs
+                        .iter()
+                        .map(|d| d.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 }
-                Err(e) => eprintln!("connected to remote ({e})"),
+            );
+            if configured.is_none() {
+                println!(
+                    "hint:       add `os = \"{}\"` under [remote] so the model is told which \
+                     shell it is writing for before the first command",
+                    platform.name()
+                );
             }
-            eprintln!("server instructions follow\n");
-            println!("{}", server.instructions());
+            println!(
+                "\n── instructions the model receives (verbatim, via MCP initialize) ──\n\n{}",
+                server.instructions()
+            );
             Ok(())
         }
         "serve" => {
