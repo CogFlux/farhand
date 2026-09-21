@@ -113,28 +113,23 @@ impl Transfer<'_> {
             }
         }
         if total > self.limits.max_transfer_bytes {
-            return Err(Error::Invalid(format!(
-                "{total} bytes exceeds the transfer limit of {} bytes",
-                self.limits.max_transfer_bytes
-            )));
+            return Err(self.too_large(&format!("`{local_raw}` ({total} bytes)")));
         }
 
         // The guard runs over the whole plan before the first byte moves, so a
         // refused file never leaves a half-uploaded tree behind.
         for (path, _) in &plan {
-            let bytes = std::fs::read(path)?;
-            self.guard.ensure_upload(path, &bytes)?;
+            self.guard.ensure_upload_file(path)?;
         }
 
-        // `write_file` creates parents as it goes; the remote remembers
+        // `upload_file` creates parents as it goes; the remote remembers
         // which directories it has seen, so a deep tree costs one check per
         // directory, not per file.
         self.remote.ensure_dir(&remote_base).await?;
         for (path, dest) in &plan {
-            let bytes = std::fs::read(path)?;
-            self.remote.write_file(dest, &bytes).await?;
+            let (_, bytes) = self.remote.upload_file(path, dest).await?;
             report.files += 1;
-            report.bytes += bytes.len() as u64;
+            report.bytes += bytes;
         }
         report.destination = remote_base;
         Ok(report)
@@ -148,17 +143,23 @@ impl Transfer<'_> {
     ) -> Result<u64> {
         let meta = std::fs::metadata(local)?;
         if meta.len() > self.limits.max_transfer_bytes {
-            return Err(Error::Invalid(format!(
-                "{} bytes exceeds the transfer limit of {} bytes",
-                meta.len(),
-                self.limits.max_transfer_bytes
-            )));
+            return Err(self.too_large(&format!("`{}` ({} bytes)", local.display(), meta.len())));
         }
-        let bytes = std::fs::read(local)?;
-        self.guard.ensure_upload(local, &bytes)?;
-        self.remote.write_file(dest, &bytes).await?;
+        self.guard.ensure_upload_file(local)?;
+        let (_, bytes) = self.remote.upload_file(local, dest).await?;
         report.files += 1;
-        Ok(bytes.len() as u64)
+        Ok(bytes)
+    }
+
+    /// The refusal for anything over `max_transfer_bytes`, naming the knob:
+    /// the model cannot change the config itself, but it can say what to
+    /// change.
+    fn too_large(&self, what: &str) -> Error {
+        Error::Invalid(format!(
+            "{what} exceeds the transfer limit of {} bytes; raise `max_transfer_bytes` under \
+             [limits] in .farhand.toml to allow it",
+            self.limits.max_transfer_bytes
+        ))
     }
 
     /// Download a remote file or directory into the allowlist. A file lands
@@ -168,7 +169,7 @@ impl Transfer<'_> {
         let remote_path = self.remote.resolve(remote_raw).await?;
         let local = self.local.resolve_for_write(local_raw)?;
         let mut report = TransferReport::default();
-        let max = self.limits.max_transfer_bytes as usize;
+        let max = self.limits.max_transfer_bytes;
 
         match self.remote.exists(&remote_path).await? {
             None => Err(Error::Invalid(format!(
@@ -187,18 +188,16 @@ impl Transfer<'_> {
                     local
                 };
                 let dest = self.local_target(&dest)?;
-                let (bytes, len) = self.remote.read_file(&remote_path, max).await?;
-                if len as usize > max {
-                    return Err(Error::Invalid(format!(
-                        "`{remote_path}` exceeds the transfer limit"
-                    )));
+                let len = self.remote.file_size(&remote_path).await?;
+                if len > max {
+                    return Err(self.too_large(&format!("`{remote_path}` ({len} bytes)")));
                 }
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&dest, &bytes)?;
+                let bytes = self.remote.download_file(&remote_path, &dest).await?;
                 report.files = 1;
-                report.bytes = bytes.len() as u64;
+                report.bytes = bytes;
                 report.destination = dest.display().to_string();
                 Ok(report)
             }
@@ -233,16 +232,19 @@ impl Transfer<'_> {
                     plan.push((f, dest));
                 }
                 for (f, dest) in plan {
-                    let (bytes, len) = self.remote.read_file(&f, max).await?;
-                    if report.bytes + len > self.limits.max_transfer_bytes {
-                        return Err(Error::Invalid("transfer limit exceeded".into()));
+                    let len = self.remote.file_size(&f).await?;
+                    if report.bytes + len > max {
+                        return Err(self.too_large(&format!(
+                            "`{remote_raw}` (at least {} bytes)",
+                            report.bytes + len
+                        )));
                     }
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    std::fs::write(&dest, &bytes)?;
+                    let bytes = self.remote.download_file(&f, &dest).await?;
                     report.files += 1;
-                    report.bytes += bytes.len() as u64;
+                    report.bytes += bytes;
                 }
                 report.destination = local.display().to_string();
                 Ok(report)

@@ -130,7 +130,7 @@ fn default_max_read_bytes() -> usize {
     512 * 1024
 }
 fn default_max_transfer_bytes() -> u64 {
-    200 * 1024 * 1024
+    1024 * 1024 * 1024
 }
 fn default_max_transfer_files() -> usize {
     5000
@@ -567,7 +567,7 @@ allowed_dirs = ["."]
 # max_command_timeout_secs = 1800
 # max_output_bytes = 102400
 # max_read_bytes = 524288
-# max_transfer_bytes = 209715200
+# max_transfer_bytes = 1073741824
 # max_transfer_files = 5000
 
 [audit]

@@ -17,7 +17,7 @@
 use std::path::{Component, Path};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use regex::bytes::{Regex, RegexSet};
+use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 
 use crate::config::GuardConfig;
 use crate::error::{Error, Result};
@@ -192,6 +192,26 @@ impl Finding {
     }
 }
 
+/// How much of a file `ensure_upload_file` looks at per step.
+const SCAN_CHUNK: usize = 1024 * 1024;
+/// Bytes carried over between steps. Every `DENIED_CONTENT` match, and any
+/// credential a `deny_content` pattern is meant to catch, is far shorter.
+const SCAN_OVERLAP: usize = 64 * 1024;
+
+/// Fill `buf` from `r` as far as the data goes; short only at EOF.
+fn read_up_to(r: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
 pub struct Guard {
     names: GlobSet,
     extra_paths: GlobSet,
@@ -210,7 +230,13 @@ impl Guard {
         for g in &cfg.deny_globs {
             extra.add(Glob::new(g).map_err(|e| Error::Config(format!("guard.deny_globs: {e}")))?);
         }
-        let content = RegexSet::new(DENIED_CONTENT.iter().map(|(_, r)| *r))
+        // ASCII semantics for `\b` and `\s`: every credential shape above is
+        // ASCII, and a Unicode word boundary makes the regex engine abandon
+        // its DFA on each non-ASCII byte, which turns scanning a binary
+        // file into a crawl (4 MB/s against 600 MB/s in practice).
+        let content = RegexSetBuilder::new(DENIED_CONTENT.iter().map(|(_, r)| *r))
+            .unicode(false)
+            .build()
             .map_err(|e| Error::Config(e.to_string()))?;
         let extra_content = cfg
             .deny_content
@@ -321,6 +347,29 @@ impl Guard {
         self.ensure_content(&format!("the content of `{}`", path.display()), bytes)
     }
 
+    /// `ensure_upload` for a file of any size: the content is scanned in
+    /// windows that overlap by `SCAN_OVERLAP`, so a secret sitting on a
+    /// window boundary is still seen and memory stays flat.
+    pub fn ensure_upload_file(&self, path: &Path) -> Result<()> {
+        if let Some(f) = self.check_path(path) {
+            return Err(f.deny(&format!("`{}`", path.display())));
+        }
+        let mut file = std::fs::File::open(path)?;
+        let mut window: Vec<u8> = Vec::with_capacity(SCAN_CHUNK + SCAN_OVERLAP);
+        loop {
+            let keep = window.len().saturating_sub(SCAN_OVERLAP);
+            window.drain(..keep);
+            let start = window.len();
+            window.resize(start + SCAN_CHUNK, 0);
+            let n = read_up_to(&mut file, &mut window[start..])?;
+            window.truncate(start + n);
+            if n == 0 {
+                return Ok(());
+            }
+            self.ensure_content(&format!("the content of `{}`", path.display()), &window)?;
+        }
+    }
+
     /// Refuse if a download may not be written to `rel` (relative to the
     /// allowlisted root it lands in).
     pub fn ensure_download(&self, rel: &Path) -> Result<()> {
@@ -345,6 +394,25 @@ mod tests {
 
     fn guard() -> Guard {
         Guard::new(&GuardConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn scans_large_files_across_window_boundaries() {
+        let g = guard();
+        let dir = std::env::temp_dir().join(format!("farhand-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clean = dir.join("clean.bin");
+        std::fs::write(&clean, vec![b'x'; SCAN_CHUNK * 2 + 17]).unwrap();
+        assert!(g.ensure_upload_file(&clean).is_ok());
+        // A key that straddles the first window boundary.
+        let mut bytes = vec![b'x'; SCAN_CHUNK - 8];
+        bytes.extend_from_slice(b" AKIAABCDEFGHIJKLMNOP ");
+        bytes.extend(std::iter::repeat_n(b'x', SCAN_CHUNK));
+        let dirty = dir.join("dirty.bin");
+        std::fs::write(&dirty, &bytes).unwrap();
+        let err = g.ensure_upload_file(&dirty).unwrap_err().to_string();
+        assert!(err.contains("aws-access-key"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

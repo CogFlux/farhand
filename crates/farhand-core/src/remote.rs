@@ -18,6 +18,9 @@
 //! the script runs in PowerShell. See [`Platform`].
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,8 +28,9 @@ use base64::Engine;
 use bytes::BytesMut;
 use futures_util::StreamExt;
 use openssh::{KnownHosts, Session, SessionBuilder, Stdio};
+use openssh_sftp_client::file::TokioCompatFile;
 use openssh_sftp_client::{Sftp, SftpOptions};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::{default_shell, Limits, Os, RemoteConfig};
@@ -43,6 +47,19 @@ const CD_FAILED_EXIT: i32 = 97;
 /// 10 and the SFTP channel holds one permanently; agents that fan out tool
 /// calls otherwise hit "failed to connect to the ssh multiplex server".
 const MAX_CHANNELS: usize = 4;
+/// One local read or remote write per step of a file transfer. The wire
+/// packets are smaller (the server caps a request near 256 KiB) and the
+/// client splits a step into as many as it needs.
+const TRANSFER_CHUNK: usize = 1024 * 1024;
+/// Bytes an upload may have in flight before it waits for acknowledgements:
+/// about 64 requests, which keeps a high-latency link busy the way scp does.
+/// A plain sequential write would pay one round trip per 256 KiB.
+const UPLOAD_WINDOW: usize = 16 * 1024 * 1024;
+/// Concurrent readers on one download. Each has one request outstanding, so
+/// this is the download's window in requests.
+const DOWNLOAD_STREAMS: u64 = 32;
+/// Bytes one download reader claims at a time.
+const DOWNLOAD_STEP: u64 = 1024 * 1024;
 /// Last line the Windows wrapper prints so the exit status of a script
 /// that ended normally survives PowerShell's own 0/1 convention.
 const WIN_EXIT_MARKER: &str = "__FARHAND_EXIT__=";
@@ -244,7 +261,10 @@ impl Remote {
             ))
         })?;
         let session = Arc::new(session);
-        let sftp = Sftp::from_clonable_session(session.clone(), SftpOptions::default())
+        let sftp_options = SftpOptions::new().tokio_compat_file_write_limit(
+            NonZeroUsize::new(UPLOAD_WINDOW).expect("non-zero window"),
+        );
+        let sftp = Sftp::from_clonable_session(session.clone(), sftp_options)
             .await
             .map_err(|e| {
                 Error::Ssh(format!(
@@ -525,6 +545,143 @@ impl Remote {
             .await
             .map_err(|e| Error::Ssh(format!("cannot write `{path}`: {e}")))?;
         Ok(path)
+    }
+
+    /// Copy the local file at `local` to `dest` (resolved here, parents
+    /// created), streaming it in `TRANSFER_CHUNK` pieces with up to
+    /// `UPLOAD_WINDOW` bytes unacknowledged. Returns the native remote path
+    /// and the byte count. A failed upload removes what it left behind.
+    pub async fn upload_file(&self, local: &Path, dest: &str) -> Result<(String, u64)> {
+        let conn = self.conn().await?;
+        let path = self.resolve(dest).await?;
+        if let Some(parent) = parent_of(conn.platform, &path) {
+            self.ensure_dir(&parent).await?;
+        }
+        let sftp_path = to_sftp_path(conn.platform, &path);
+        let _permit = self.channels.acquire().await.expect("semaphore open");
+        let mut src = tokio::fs::File::open(local).await?;
+        let file = conn
+            .sftp
+            .create(&sftp_path)
+            .await
+            .map_err(|e| Error::Ssh(format!("cannot create `{path}`: {e}")))?;
+        let mut buf = vec![0u8; TRANSFER_CHUNK];
+        let mut sent: u64 = 0;
+        let copied: Result<()> = async {
+            // The pipelined writer is not `Unpin`. Once `flush` has returned
+            // every write is acknowledged; dropping it at the end of this
+            // block closes the handle in the background.
+            let mut file = std::pin::pin!(TokioCompatFile::new(file));
+            loop {
+                let n = src.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buf[..n]).await?;
+                sent += n as u64;
+            }
+            file.flush().await?;
+            Ok(())
+        }
+        .await;
+        if let Err(e) = copied {
+            let _ = conn.sftp.fs().remove_file(&sftp_path).await;
+            return Err(Error::Ssh(format!("upload of `{path}` failed: {e}")));
+        }
+        Ok((path, sent))
+    }
+
+    /// Size of the regular file at `path` (resolved here).
+    pub async fn file_size(&self, path: &str) -> Result<u64> {
+        let conn = self.conn().await?;
+        let path = self.resolve(path).await?;
+        let _permit = self.channels.acquire().await.expect("semaphore open");
+        let meta = conn
+            .sftp
+            .fs()
+            .metadata(to_sftp_path(conn.platform, &path))
+            .await
+            .map_err(|e| not_found(&path, e))?;
+        if meta.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            return Err(Error::Invalid(format!("`{path}` is a directory")));
+        }
+        Ok(meta.len().unwrap_or(0))
+    }
+
+    /// Copy the remote file at `path` (resolved here) to the local `dest`,
+    /// using `DOWNLOAD_STREAMS` readers that each claim `DOWNLOAD_STEP`
+    /// ranges in turn. The data lands in a `.farhand-part` file next to
+    /// `dest` and is renamed into place once complete, so an interrupted
+    /// download leaves nothing that looks finished. Returns the byte count.
+    pub async fn download_file(&self, path: &str, dest: &Path) -> Result<u64> {
+        let conn = self.conn().await?;
+        let path = self.resolve(path).await?;
+        let sftp_path = to_sftp_path(conn.platform, &path);
+        let _permit = self.channels.acquire().await.expect("semaphore open");
+        let meta = conn
+            .sftp
+            .fs()
+            .metadata(&sftp_path)
+            .await
+            .map_err(|e| not_found(&path, e))?;
+        if meta.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            return Err(Error::Invalid(format!("`{path}` is a directory")));
+        }
+        let len = meta.len().unwrap_or(0);
+        let part = {
+            let mut name = dest.file_name().unwrap_or_default().to_os_string();
+            name.push(".farhand-part");
+            dest.with_file_name(name)
+        };
+        {
+            let f = tokio::fs::File::create(&part).await?;
+            f.set_len(len).await?;
+        }
+        let next = AtomicU64::new(0);
+        let streams = DOWNLOAD_STREAMS.min(len.div_ceil(DOWNLOAD_STEP)).max(1);
+        let readers = (0..streams).map(|_| async {
+            let mut file = conn
+                .sftp
+                .open(&sftp_path)
+                .await
+                .map_err(|e| not_found(&path, e))?;
+            let mut out = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&part)
+                .await?;
+            loop {
+                let offset = next.fetch_add(DOWNLOAD_STEP, Ordering::Relaxed);
+                if offset >= len {
+                    break;
+                }
+                let want = DOWNLOAD_STEP.min(len - offset);
+                file.seek(std::io::SeekFrom::Start(offset)).await?;
+                let mut buf = BytesMut::with_capacity(want as usize);
+                while (buf.len() as u64) < want {
+                    let n = (want - buf.len() as u64).min(256 * 1024) as u32;
+                    match file.read(n, buf.split_off(buf.len())).await? {
+                        Some(bytes) => buf.unsplit(bytes),
+                        None => {
+                            return Err(Error::Ssh(format!(
+                                "`{path}` shrank while it was being downloaded"
+                            )))
+                        }
+                    }
+                }
+                out.seek(std::io::SeekFrom::Start(offset)).await?;
+                out.write_all(&buf).await?;
+            }
+            out.flush().await?;
+            let _ = file.close().await;
+            Ok::<(), Error>(())
+        });
+        let done = futures_util::future::try_join_all(readers).await;
+        if let Err(e) = done {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(e);
+        }
+        tokio::fs::rename(&part, dest).await?;
+        Ok(len)
     }
 
     /// Create `dir` and any missing parents over SFTP. `dir` is a resolved

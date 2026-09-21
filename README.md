@@ -94,7 +94,10 @@ The remote may be Linux, macOS, BSD — or **Windows** with OpenSSH Server,
 where commands run in PowerShell (`os = "windows"` under `[remote]` tells
 the model so up front; the platform is detected on connect regardless).
 Directory creation and tree walking go over SFTP, so uploads, downloads,
-`remote_write` and `remote_edit` behave the same everywhere.
+`remote_write` and `remote_edit` behave the same everywhere. Transfers are
+streamed with many requests in flight, so a large file moves at link speed
+and memory stays flat whatever its size; the default cap of 1 GiB per
+transfer is `max_transfer_bytes` under `[limits]`.
 
 Config is found in this order: `--config PATH`, `$FARHAND_CONFIG`,
 `./.farhand.toml`, `~/.config/farhand/config.toml`. The per-project

@@ -107,7 +107,10 @@ Start the agent in any local directory. What the model gets:
 
 Workflow for "use this local file on the server": drop it into
 `~/FarHand-Outbox/`, then tell the agent "upload `foo.pdf` to `data/`". Every
-file passes the secret guard first; a refusal names the rule.
+file passes the secret guard first; a refusal names the rule. One transfer
+may move up to 1 GiB by default; for bigger archives set
+`max_transfer_bytes` under `[limits]` in `.farhand.toml` (the model cannot
+change that file, so it will ask you).
 
 Audit log: `~/.local/share/farhand/audit/YYYY-MM-DD.jsonl`. Read it with
 `jq`:
