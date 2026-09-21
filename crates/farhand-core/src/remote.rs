@@ -670,10 +670,13 @@ fn encode_utf16_b64(script: &str) -> String {
 ///
 /// The inner script must end naturally: `exit` from a `-EncodedCommand`
 /// script discards output still in PowerShell's formatting pipeline. So the
-/// last thing it prints is [`WIN_EXIT_MARKER`] with `$LASTEXITCODE` and the
-/// error count, which [`take_windows_exit_marker`] turns back into a status.
-/// A command that calls `exit` itself skips the marker and its status
-/// arrives as the process status instead.
+/// last thing it prints is [`WIN_EXIT_MARKER`] with the status, which
+/// [`take_windows_exit_marker`] reads back. The status follows shell
+/// convention: that of the last statement (`$?`), with `$LASTEXITCODE` for
+/// a failed native command. `$Error` is deliberately not consulted: it also
+/// collects every stderr line a native program wrote and every error that
+/// `-ErrorAction SilentlyContinue` hid. A command that calls `exit` itself
+/// skips the marker and its status arrives as the process status instead.
 fn windows_wrapper(exe: &str, extra: &[String], cwd: &str, command: &str, timeout: u64) -> String {
     let inner = format!(
         "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Continue'\n\
@@ -681,9 +684,10 @@ fn windows_wrapper(exe: &str, extra: &[String], cwd: &str, command: &str, timeou
          $env:NO_COLOR='1'\n\
          try {{ Set-Location -LiteralPath {cwd} -ErrorAction Stop }} \
          catch {{ [Console]::Error.WriteLine('cannot cd'); exit {CD_FAILED_EXIT} }}\n\
-         $global:LASTEXITCODE=0; $Error.Clear()\n\
+         $global:LASTEXITCODE=0\n\
          {command}\n\
-         Write-Output \"{WIN_EXIT_MARKER}$LASTEXITCODE,$($Error.Count)\"\n",
+         $__fh_ok=$?\n\
+         Write-Output \"{WIN_EXIT_MARKER}$(if ($__fh_ok) {{0}} elseif ($LASTEXITCODE) {{$LASTEXITCODE}} else {{1}})\"\n",
         cwd = ps_quote(cwd),
     );
     let mut args: Vec<String> = extra.iter().map(|a| ps_quote(a)).collect();
@@ -719,16 +723,7 @@ fn take_windows_exit_marker(stdout: &mut Vec<u8>) -> Option<i32> {
     let pos = text.rfind(WIN_EXIT_MARKER)?;
     let rest = &text[pos + WIN_EXIT_MARKER.len()..];
     let line = rest.lines().next().unwrap_or("").trim();
-    let (last, errors) = line.split_once(',')?;
-    let last: i32 = last.trim().parse().ok()?;
-    let errors: u32 = errors.trim().parse().ok()?;
-    let code = if last != 0 {
-        last
-    } else if errors > 0 {
-        1
-    } else {
-        0
-    };
+    let code: i32 = line.parse().ok()?;
     // Keep only what came before the marker, minus trailing blank lines.
     let keep = text[..pos].trim_end_matches(['\r', '\n']).to_string();
     stdout.clear();
@@ -1082,12 +1077,12 @@ mod tests {
 
     #[test]
     fn exit_marker_and_clixml() {
-        let mut out = b"table\r\n__FARHAND_EXIT__=3,1\r\n\r\n".to_vec();
+        let mut out = b"table\r\n__FARHAND_EXIT__=3\r\n\r\n".to_vec();
         assert_eq!(take_windows_exit_marker(&mut out), Some(3));
         assert_eq!(out, b"table\n");
-        let mut out = b"x\n__FARHAND_EXIT__=0,2\n".to_vec();
+        let mut out = b"x\n__FARHAND_EXIT__=1\n".to_vec();
         assert_eq!(take_windows_exit_marker(&mut out), Some(1));
-        let mut out = b"__FARHAND_EXIT__=0,0\n".to_vec();
+        let mut out = b"__FARHAND_EXIT__=0\n".to_vec();
         assert_eq!(take_windows_exit_marker(&mut out), Some(0));
         assert!(out.is_empty());
         let mut out = b"no marker".to_vec();
