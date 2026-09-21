@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! farhand serve [--config PATH]               run the MCP server (what agents launch)
-//! farhand check [--config PATH]               connect once; show the setup and what the model is told
+//! farhand check [--config PATH] [-v]          connect once and show the setup; -v adds the model's instructions
 //! farhand validate [--config PATH] [--cwd DIR] [--json]   parse the config only; no network
 //! farhand init                                print a configuration template
 //! farhand install <agent> [--scope user|project] [--config PATH]
@@ -27,7 +27,7 @@ use crate::server::FarHand;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  farhand serve [--config PATH]\n  farhand check [--config PATH]\n  \
+        "usage:\n  farhand serve [--config PATH]\n  farhand check [--config PATH] [-v]\n  \
          farhand validate [--config PATH] [--cwd DIR] [--json]\n  farhand init\n  \
          farhand install <opencode|claude-code|codex> [--scope user|project] [--config PATH]\n  \
          farhand uninstall <opencode|claude-code|codex> [--scope user|project]\n  \
@@ -43,6 +43,7 @@ struct Args {
     config: Option<PathBuf>,
     cwd: Option<PathBuf>,
     json: bool,
+    verbose: bool,
     scope: install::Scope,
 }
 
@@ -53,12 +54,14 @@ fn parse_args() -> Args {
     let mut config = None;
     let mut cwd = None;
     let mut json = false;
+    let mut verbose = false;
     let mut scope = install::Scope::User;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" | "-c" => config = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--cwd" => cwd = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--json" => json = true,
+            "-v" | "--verbose" => verbose = true,
             "--scope" => {
                 scope = match it.next().as_deref() {
                     Some("user") => install::Scope::User,
@@ -77,6 +80,7 @@ fn parse_args() -> Args {
         config,
         cwd,
         json,
+        verbose,
         scope,
     }
 }
@@ -218,10 +222,14 @@ async fn main() -> anyhow::Result<()> {
                     platform.name()
                 );
             }
-            println!(
-                "\n── instructions the model receives (verbatim, via MCP initialize) ──\n\n{}",
-                server.instructions()
-            );
+            if args.verbose {
+                println!(
+                    "\n── instructions the model receives (verbatim, via MCP initialize) ──\n\n{}",
+                    server.instructions()
+                );
+            } else {
+                println!("\n(-v shows the instructions the model receives)");
+            }
             Ok(())
         }
         "serve" => {

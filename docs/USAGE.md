@@ -52,7 +52,8 @@ workdir = "~/myapp"        # where commands start; relative paths resolve here
 allowed_dirs = ["."]       # this folder; or e.g. ["~/FarHand-Outbox", "assets"]
 ```
 
-`farhand check` prints the instructions the model will receive. If
+`farhand check` connects once and summarises the setup; `farhand check -v` also
+prints the instructions the model will receive, verbatim. If
 `ssh <host>` works in a terminal, this works. Host keys are checked strictly
 (`StrictHostKeyChecking=yes`): FarHand only connects to hosts already in
 `~/.ssh/known_hosts`, so connect once by hand before the first `farhand check`.
