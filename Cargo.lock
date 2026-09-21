@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "farhand"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -252,13 +252,14 @@ dependencies = [
 
 [[package]]
 name = "farhand-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
  "chrono",
  "dirs",
+ "futures-util",
  "globset",
  "openssh",
  "openssh-sftp-client",

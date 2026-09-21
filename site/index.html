@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FarHand — remote hands for coding agents</title>
-<meta name="description" content="FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto a Linux machine over SSH. The agent works there; your laptop, and your credentials, stay here.">
+<meta name="description" content="FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto another machine over SSH — Linux, macOS or Windows. The agent works there; your laptop, and your credentials, stay here.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111'/%3E%3Ccircle cx='9' cy='16' r='3' fill='%23fff'/%3E%3Ccircle cx='23' cy='16' r='3' fill='%2334c759'/%3E%3Crect x='11' y='15' width='10' height='2' fill='%23444'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -206,7 +206,7 @@
 
   <div class="hero">
     <h1>Remote hands for coding agents.</h1>
-    <p class="lede">FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto a Linux machine over SSH. The agent works there. Your laptop — and every credential on it — stays here.</p>
+    <p class="lede">FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto another machine over SSH — Linux, macOS or Windows. The agent works there. Your laptop — and every credential on it — stays here.</p>
     <div class="term" aria-label="Agent transcript example"><span class="you">› run the tests</span>
 <span class="tool">⚙ farhand_remote_bash</span> <span class="dim">[command=cargo test]</span>  <span class="dim">→ devbox:~/myapp</span>
 <span class="ok">test result: ok. 48 passed</span>
@@ -233,7 +233,7 @@
       <div class="arrow">MCP (stdio)<br>→</div>
       <div class="box here"><b>farhand</b><span class="muted">Secret guard, local allowlist, approval, audit log. Never forwards your environment.</span></div>
       <div class="arrow">ssh + sftp<br>→</div>
-      <div class="box there"><b>Remote</b><span class="muted">Commands run in the remote user's login shell, in the configured workdir. Plain Linux; nothing to install.</span></div>
+      <div class="box there"><b>Remote</b><span class="muted">Commands run in the remote user's own shell, in the configured workdir — a POSIX shell, or PowerShell on Windows. Nothing to install beyond sshd.</span></div>
     </div>
     <p>Each project is a folder on your machine with a <code>.farhand.toml</code> that names the host and the remote working directory. Open the agent there and it is remote; open it anywhere else and it is an ordinary local session. Prompts like "list the files" or "run the tests" mean the remote workdir — the model is told so, and the local tools are disabled, not merely discouraged.</p>
 <pre><code>[remote]
@@ -312,7 +312,7 @@ mode = "ask"               # ask | auto | strict</code></pre>
 
   <section id="get">
     <h2>Install</h2>
-    <p>One static binary for macOS and Linux (Apple Silicon, Intel, x86_64, aarch64). The remote needs nothing beyond a standard shell and SFTP; <code>ripgrep</code> there makes search faster.</p>
+    <p>One static binary for macOS and Linux (Apple Silicon, Intel, x86_64, aarch64). The remote needs nothing beyond sshd with SFTP — Linux, macOS, BSD, or Windows with OpenSSH Server; <code>ripgrep</code> there makes search faster.</p>
     <div class="tabs" role="tablist">
       <button role="tab" aria-selected="true" data-tab="sh">curl | sh</button>
       <button role="tab" aria-selected="false" data-tab="npm">npm</button>

@@ -15,10 +15,22 @@ and the agent works locally as before.
 
 ## 2. On the remote (once per host)
 
-Nothing to install for the basics; `bash`, `timeout`, `base64` and the SFTP
-subsystem are standard. Install `ripgrep` for fast `remote_glob` /
-`remote_grep` (`apt install ripgrep`); FarHand falls back to `find`/`grep`
-without it.
+**Linux / macOS / BSD**: nothing to install for the basics; `bash`,
+`timeout`, `base64` and the SFTP subsystem are standard. Install `ripgrep`
+for fast `remote_glob` / `remote_grep` (`apt install ripgrep`); FarHand falls
+back to `find`/`grep` without it.
+
+**Windows**: OpenSSH Server (Settings → System → Optional features, or
+`Add-WindowsCapability -Online -Name OpenSSH.Server*`) with its SFTP
+subsystem, which is on by default. Commands run in PowerShell — Windows
+PowerShell 5.1 as shipped, or PowerShell 7 with `shell = ["pwsh"]` — and
+the model is told to write PowerShell rather than bash. sshd's `DefaultShell`
+may be PowerShell (Microsoft's recommendation) or the default `cmd.exe`;
+both work. `ripgrep` is picked up if it is on `PATH`. Put
+`os = "windows"` in `[remote]`: FarHand detects the platform on connect
+anyway, but the model receives its instructions before the first command
+and should know which shell it is writing for. Paths in `workdir` and tool
+calls may use `/` or `\` (`C:/Users/me/proj`, `~/proj`).
 
 ## 3. Making a project remote
 

@@ -177,7 +177,20 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("config: {} (active here: {})", l.path.display(), l.active());
             let server = FarHand::new(l.config, true)?;
             server.preflight().await?;
-            eprintln!("connected to remote; server instructions follow\n");
+            match server.detected_platform().await {
+                Ok((platform, configured)) => {
+                    eprintln!("connected to remote ({} platform)", platform.name());
+                    if configured.is_none() {
+                        eprintln!(
+                            "hint: add `os = \"{}\"` under [remote] so the model is told which \
+                             shell it is writing for before the first command",
+                            platform.name()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("connected to remote ({e})"),
+            }
+            eprintln!("server instructions follow\n");
             println!("{}", server.instructions());
             Ok(())
         }

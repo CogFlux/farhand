@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/farhand-core", "crates/farhand"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/CogFlux/farhand"
@@ -27,6 +27,7 @@ dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"
 base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 regex = "1"
 globset = "0.4"
 walkdir = "2"

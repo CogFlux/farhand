@@ -11,7 +11,6 @@ use crate::error::{Error, Result};
 use crate::guard::Guard;
 use crate::local::LocalScope;
 use crate::remote::Remote;
-use crate::text::shell_quote;
 
 /// Directory names skipped by default when uploading a tree. They are
 /// either regenerated on the remote or never wanted there.
@@ -127,33 +126,10 @@ impl Transfer<'_> {
             self.guard.ensure_upload(path, &bytes)?;
         }
 
-        // Create the directory skeleton in one command.
-        let mut dirs: Vec<String> = plan
-            .iter()
-            .filter_map(|(_, dest)| {
-                Path::new(dest)
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-            })
-            .collect();
-        dirs.push(remote_base.clone());
-        dirs.sort();
-        dirs.dedup();
-        let mkdir = format!(
-            "mkdir -p {}",
-            dirs.iter()
-                .map(|d| shell_quote(d))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let out = self.remote.exec(&mkdir, None, Some(60)).await?;
-        if out.exit_code != 0 {
-            return Err(Error::Ssh(format!(
-                "mkdir -p failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-
+        // `write_file` creates parents as it goes; the remote remembers
+        // which directories it has seen, so a deep tree costs one check per
+        // directory, not per file.
+        self.remote.ensure_dir(&remote_base).await?;
         for (path, dest) in &plan {
             let bytes = std::fs::read(path)?;
             self.remote.write_file(dest, &bytes).await?;
@@ -200,7 +176,13 @@ impl Transfer<'_> {
             ))),
             Some(false) => {
                 let dest = if local.is_dir() || local_raw.ends_with('/') {
-                    local.join(Path::new(&remote_path).file_name().unwrap_or_default())
+                    // The remote path may use `\`, which is an ordinary
+                    // character to the local `Path` on POSIX.
+                    let name = remote_path
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(&remote_path);
+                    local.join(name)
                 } else {
                     local
                 };
@@ -221,23 +203,10 @@ impl Transfer<'_> {
                 Ok(report)
             }
             Some(true) => {
-                let list = self
+                let files = self
                     .remote
-                    .exec(
-                        &format!("find {} -type f -print", shell_quote(&remote_path)),
-                        None,
-                        Some(120),
-                    )
+                    .walk_files(&remote_path, self.limits.max_transfer_files)
                     .await?;
-                if list.exit_code != 0 {
-                    return Err(Error::Ssh(
-                        String::from_utf8_lossy(&list.stderr).trim().to_string(),
-                    ));
-                }
-                let files: Vec<String> = String::from_utf8_lossy(&list.stdout)
-                    .lines()
-                    .map(str::to_string)
-                    .collect();
                 if files.len() > self.limits.max_transfer_files {
                     return Err(Error::Invalid(format!(
                         "more than {} files; narrow the download",
@@ -250,15 +219,17 @@ impl Transfer<'_> {
                 // editor or agent would trust.
                 let mut plan: Vec<(String, PathBuf)> = Vec::with_capacity(files.len());
                 for f in files {
+                    // Native remote separators become `/` locally.
                     let rel = f
                         .strip_prefix(&remote_path)
                         .unwrap_or(&f)
-                        .trim_start_matches('/');
+                        .trim_start_matches(['/', '\\'])
+                        .replace('\\', "/");
                     if rel.is_empty() || rel.split('/').any(|seg| seg == "..") {
                         report.skipped.push(f.clone());
                         continue;
                     }
-                    let dest = self.local_target(&local.join(rel))?;
+                    let dest = self.local_target(&local.join(&rel))?;
                     plan.push((f, dest));
                 }
                 for (f, dest) in plan {

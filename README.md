@@ -90,6 +90,12 @@ Nothing else lives in that folder — the code is on the remote — so this is
 the natural default. Absolute paths and `~/...` work too; relative entries
 are only accepted in a project `.farhand.toml`, never `..`, `/` or `~`.
 
+The remote may be Linux, macOS, BSD — or **Windows** with OpenSSH Server,
+where commands run in PowerShell (`os = "windows"` under `[remote]` tells
+the model so up front; the platform is detected on connect regardless).
+Directory creation and tree walking go over SFTP, so uploads, downloads,
+`remote_write` and `remote_edit` behave the same everywhere.
+
 Config is found in this order: `--config PATH`, `$FARHAND_CONFIG`,
 `./.farhand.toml`, `~/.config/farhand/config.toml`. The per-project
 `.farhand.toml` is the normal one: it is what makes a directory remote. The
@@ -144,7 +150,7 @@ The tools then appear as `farhand_remote_bash`, `farhand_upload`, and so on.
 
 | Tool | What it does |
 |---|---|
-| `remote_bash` | Run a command on the remote (bounded output, remote `timeout`, local watchdog). |
+| `remote_bash` | Run a command on the remote in its own shell — POSIX shell, or PowerShell on Windows (bounded output, remote timeout, local watchdog). |
 | `remote_read` | Read a remote file with line numbers; `offset`/`limit` page through it. |
 | `remote_write` | Create or overwrite a remote file; parents are created. |
 | `remote_edit` | Replace an exact, unique string in a remote file (`replace_all` optional; CRLF files are matched with LF strings and kept CRLF). |

@@ -47,11 +47,19 @@ pub struct RemoteConfig {
     /// own OpenSSH configuration; FarHand never handles credentials itself.
     pub host: String,
     /// Directory relative paths resolve against and commands start in.
-    /// Absolute, or `~` / `~/...` for the remote user's home.
+    /// Absolute (`/srv/app`, `C:\\work`), or `~` / `~/...` for the remote
+    /// user's home.
     pub workdir: String,
-    /// Shell that runs every command, as argv. The command text is appended
-    /// as one final argument, so the last element must accept a script
-    /// (`-c`, `-lc`, ...).
+    /// What the remote runs. Detected on connect from the SFTP root, so
+    /// `auto` is fine; set it explicitly so the model is told before the
+    /// first command which shell it is writing for.
+    #[serde(default)]
+    pub os: Os,
+    /// Shell that runs every command, as argv. On a POSIX remote the
+    /// command text is appended as one final argument, so the last element
+    /// must accept a script (`-c`, `-lc`, ...). On Windows only the first
+    /// element is used, as the PowerShell executable (`powershell.exe` by
+    /// default; set `["pwsh"]` for PowerShell 7).
     #[serde(default = "default_shell")]
     pub shell: Vec<String>,
     #[serde(default = "default_connect_timeout")]
@@ -61,8 +69,20 @@ pub struct RemoteConfig {
     pub server_alive_interval_secs: u64,
 }
 
-fn default_shell() -> Vec<String> {
+pub fn default_shell() -> Vec<String> {
     vec!["bash".into(), "-lc".into()]
+}
+
+/// The remote operating system family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Os {
+    #[default]
+    Auto,
+    /// Linux, macOS, BSD: a POSIX shell, `timeout(1)`, `base64(1)`.
+    Posix,
+    /// Windows with OpenSSH Server: commands run in PowerShell.
+    Windows,
 }
 fn default_connect_timeout() -> u64 {
     20
@@ -363,15 +383,29 @@ impl Config {
         if self.remote.host.starts_with('-') {
             return Err(Error::Config("remote.host may not start with '-'".into()));
         }
-        let w = self.remote.workdir.trim_end_matches('/');
-        let w = if w.is_empty() && self.remote.workdir.starts_with('/') {
+        let raw = self.remote.workdir.trim();
+        let w = raw.trim_end_matches(['/', '\\']);
+        let w = if w.is_empty() && raw.starts_with('/') {
             "/".to_string()
+        } else if is_drive_root(raw) {
+            // `C:\` keeps its separator; `C:` alone would be drive-relative.
+            format!("{}\\", &raw[..2])
         } else {
             w.to_string()
         };
-        if !(w.starts_with('/') || w == "~" || w.starts_with("~/")) {
+        let windows_abs = w.len() >= 3
+            && w.as_bytes()[0].is_ascii_alphabetic()
+            && w.as_bytes()[1] == b':'
+            && (w.as_bytes()[2] == b'\\' || w.as_bytes()[2] == b'/');
+        if !(w.starts_with('/')
+            || w == "~"
+            || w.starts_with("~/")
+            || w.starts_with("~\\")
+            || windows_abs)
+        {
             return Err(Error::Config(
-                "remote.workdir must be an absolute path or start with `~` (the remote home)"
+                "remote.workdir must be an absolute path (`/srv/app`, `C:\\work`) or start with `~` \
+                 (the remote home)"
                     .into(),
             ));
         }
@@ -466,6 +500,15 @@ fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
 }
 
 /// `~` and `~/x` expand to the home directory; anything else is returned as-is.
+/// `C:\`, `C:/` or `C:` — a Windows drive root, with or without separator.
+fn is_drive_root(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() == 2 || b.len() == 3)
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/')
+}
+
 pub fn expand_home(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     if s == "~" {
@@ -500,7 +543,9 @@ host = "devbox"
 # Directory on the remote where every command starts and relative paths
 # resolve. Absolute, or `~/...` for the remote user's home.
 workdir = "~/project"
-# shell = ["bash", "-lc"]
+# os = "auto"              # "posix" or "windows"; detected on connect, but set it so
+#                          # the model knows which shell it is writing for
+# shell = ["bash", "-lc"]  # Windows: ["powershell"] (default) or ["pwsh"]
 # connect_timeout_secs = 20
 # server_alive_interval_secs = 30
 
@@ -594,6 +639,15 @@ mod tests {
         assert_eq!(cfg.remote.workdir, "~");
         let cfg = Config::parse("[remote]\nhost='h'\nworkdir='/srv/app/'").unwrap();
         assert_eq!(cfg.remote.workdir, "/srv/app");
+        let cfg = Config::parse("[remote]\nhost='h'\nworkdir='C:\\work\\'").unwrap();
+        assert_eq!(cfg.remote.workdir, "C:\\work");
+        let cfg = Config::parse("[remote]\nhost='h'\nworkdir='D:/'").unwrap();
+        assert_eq!(cfg.remote.workdir, "D:\\");
+        let cfg = Config::parse("[remote]\nhost='h'\nworkdir='C:'").unwrap();
+        assert_eq!(cfg.remote.workdir, "C:\\");
+        assert!(Config::parse("[remote]\nhost='h'\nworkdir='work'").is_err());
+        let cfg = Config::parse("[remote]\nhost='h'\nworkdir='/'\nos='windows'").unwrap();
+        assert_eq!(cfg.remote.os, Os::Windows);
     }
 
     #[test]

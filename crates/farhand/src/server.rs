@@ -13,7 +13,7 @@ use farhand_core::config::Config;
 use farhand_core::error::Error;
 use farhand_core::guard::Guard;
 use farhand_core::local::LocalScope;
-use farhand_core::remote::{ExecOutput, Remote};
+use farhand_core::remote::{ps_quote, ExecOutput, Platform, Remote};
 use farhand_core::text::{bounded, numbered_window, shell_quote};
 use farhand_core::transfer::{Transfer, TransferReport, DEFAULT_EXCLUDES};
 use rmcp::handler::server::tool::ToolRouter;
@@ -215,8 +215,21 @@ impl FarHand {
                 .join(", ")
         };
         let addr = self.inner().remote.address();
+        let platform_note = match self.inner().remote.configured_platform() {
+            Some(Platform::Windows) => {
+                "The remote runs WINDOWS: remote_bash runs PowerShell (not bash), so write \
+                 PowerShell — Get-ChildItem, Select-String, `cmd /c` for batch commands — and \
+                 paths look like C:\\Users\\me\\proj (forward slashes are accepted too). Do \
+                 not call `exit` inside a command; output printed before it is lost. "
+            }
+            Some(Platform::Posix) => "",
+            None => {
+                "remote_bash runs the remote's own shell: a POSIX shell on Linux/macOS, \
+                 PowerShell on Windows; remote_info reports which once connected. "
+            }
+        };
         format!(
-            "FarHand: all work happens on the remote host `{host}`, in `{workdir}`. \
+            "FarHand: all work happens on the remote host `{host}`, in `{workdir}`. {platform_note}\
              The USER is at the local machine, not on the remote. The remote is reachable from \
              the user's machine as `{hostname}` (ssh port {port}); any service you start there \
              listens on the remote, so report it as http://{hostname}:PORT, never as localhost, \
@@ -248,11 +261,23 @@ impl FarHand {
         self.inner().remote.connect().await
     }
 
+    /// The platform the remote turned out to be, and what the config said.
+    pub async fn detected_platform(&self) -> farhand_core::Result<(Platform, Option<Platform>)> {
+        let detected = self.inner().remote.platform().await?;
+        Ok((detected, self.inner().remote.configured_platform()))
+    }
+
+    async fn platform_and_rg(&self) -> farhand_core::Result<(Platform, bool)> {
+        let platform = self.inner().remote.platform().await?;
+        let has_rg = self.inner().remote.has_tool("rg").await?;
+        Ok((platform, has_rg))
+    }
+
     // ---- remote tools ----
 
     #[tool(
         name = "remote_bash",
-        description = "Run a shell command ON THE REMOTE HOST (you are already there: do not ssh/scp/rsync to the same host or to the user's machine from inside it — use remote_read/remote_write to touch remote files and upload/download to cross to the local allowlist). Returns stdout, stderr and the exit code. Output is bounded; use head/tail/grep to narrow it. Runs in the remote workdir unless cwd is given."
+        description = "Run a command ON THE REMOTE HOST in its own shell (POSIX shell on Linux/macOS, PowerShell on Windows). You are already there: do not ssh/scp/rsync to the same host or to the user's machine from inside it — use remote_read/remote_write to touch remote files and upload/download to cross to the local allowlist. Returns stdout, stderr and the exit code. Output is bounded; narrow it with head/tail/grep (Select-Object/Select-String on Windows). Runs in the remote workdir unless cwd is given."
     )]
     async fn remote_bash(
         &self,
@@ -417,7 +442,17 @@ impl FarHand {
         let path = a.path.unwrap_or_default();
         rec.path = Some(&path);
         let target = if path.is_empty() { "." } else { path.as_str() };
-        let cmd = format!("ls -la {}", shell_quote(target));
+        let platform = match self.inner().remote.platform().await {
+            Ok(p) => p,
+            Err(e) => return Ok(self.fail(rec, started, e)),
+        };
+        let cmd = match platform {
+            Platform::Posix => format!("ls -la {}", shell_quote(target)),
+            Platform::Windows => format!(
+                "Get-ChildItem -Force -LiteralPath {} | Format-Table Mode,LastWriteTime,Length,Name -AutoSize",
+                ps_quote(target)
+            ),
+        };
         match self.inner().remote.exec(&cmd, None, Some(30)).await {
             Ok(out) => {
                 rec.exit_code = Some(out.exit_code);
@@ -440,21 +475,34 @@ impl FarHand {
         let mut rec = Record::new("remote_glob");
         rec.command = Some(&a.pattern);
         let dir = a.path.unwrap_or_default();
-        let has_rg = match self.inner().remote.has_tool("rg").await {
-            Ok(b) => b,
+        let (platform, has_rg) = match self.platform_and_rg().await {
+            Ok(v) => v,
             Err(e) => return Ok(self.fail(rec, started, e)),
         };
-        let cmd = if has_rg {
-            format!(
+        let cmd = match (platform, has_rg) {
+            (Platform::Posix, true) => format!(
                 "rg --files --hidden -g {} -g '!.git' . | head -n 2000",
                 shell_quote(&a.pattern)
-            )
-        } else {
-            let name = a.pattern.rsplit('/').next().unwrap_or(&a.pattern);
-            format!(
-                "find . -path ./.git -prune -o -type f -name {} -print | head -n 2000",
-                shell_quote(name)
-            )
+            ),
+            (Platform::Posix, false) => {
+                let name = a.pattern.rsplit('/').next().unwrap_or(&a.pattern);
+                format!(
+                    "find . -path ./.git -prune -o -type f -name {} -print | head -n 2000",
+                    shell_quote(name)
+                )
+            }
+            (Platform::Windows, true) => format!(
+                "rg --files --hidden -g {} -g '!.git' . | Select-Object -First 2000",
+                ps_quote(&a.pattern)
+            ),
+            (Platform::Windows, false) => format!(
+                concat!(
+                    "$b=(Get-Location).Path.Length+1; Get-ChildItem -Recurse -File -Force . | ",
+                    "ForEach-Object {{ $_.FullName.Substring($b).Replace('\\','/') }} | ",
+                    "Where-Object {{ $_ -like {} -and $_ -notlike '.git/*' }} | Select-Object -First 2000"
+                ),
+                ps_quote(&glob_to_like(&a.pattern))
+            ),
         };
         match self.inner().remote.exec(&cmd, Some(&dir), Some(60)).await {
             Ok(out) => {
@@ -484,30 +532,62 @@ impl FarHand {
         rec.command = Some(&a.pattern);
         let dir = a.path.unwrap_or_default();
         let max = a.max_results.unwrap_or(DEFAULT_GREP_RESULTS).clamp(1, 5000);
-        let has_rg = match self.inner().remote.has_tool("rg").await {
-            Ok(b) => b,
+        let (platform, has_rg) = match self.platform_and_rg().await {
+            Ok(v) => v,
             Err(e) => return Ok(self.fail(rec, started, e)),
         };
-        let include = a
-            .include
-            .as_deref()
-            .map(|g| format!(" -g {}", shell_quote(g)))
-            .unwrap_or_default();
-        let cmd = if has_rg {
-            format!(
-                "rg -n --no-heading --color never -S{include} -e {} . | head -n {max}",
-                shell_quote(&a.pattern)
-            )
-        } else {
-            let inc = a
-                .include
-                .as_deref()
-                .map(|g| format!(" --include={}", shell_quote(g)))
-                .unwrap_or_default();
-            format!(
-                "grep -rnI -E{inc} --exclude-dir=.git -e {} . | head -n {max}",
-                shell_quote(&a.pattern)
-            )
+        let cmd = match (platform, has_rg) {
+            (Platform::Posix, true) => {
+                let include = a
+                    .include
+                    .as_deref()
+                    .map(|g| format!(" -g {}", shell_quote(g)))
+                    .unwrap_or_default();
+                format!(
+                    "rg -n --no-heading --color never -S{include} -e {} . | head -n {max}",
+                    shell_quote(&a.pattern)
+                )
+            }
+            (Platform::Posix, false) => {
+                let inc = a
+                    .include
+                    .as_deref()
+                    .map(|g| format!(" --include={}", shell_quote(g)))
+                    .unwrap_or_default();
+                format!(
+                    "grep -rnI -E{inc} --exclude-dir=.git -e {} . | head -n {max}",
+                    shell_quote(&a.pattern)
+                )
+            }
+            (Platform::Windows, true) => {
+                let include = a
+                    .include
+                    .as_deref()
+                    .map(|g| format!(" -g {}", ps_quote(g)))
+                    .unwrap_or_default();
+                format!(
+                    "rg -n --no-heading --color never -S{include} -e {} . | Select-Object -First {max}",
+                    ps_quote(&a.pattern)
+                )
+            }
+            (Platform::Windows, false) => {
+                let inc = a
+                    .include
+                    .as_deref()
+                    .map(|g| format!(" -Include {}", ps_quote(g)))
+                    .unwrap_or_default();
+                format!(
+                    concat!(
+                        "$b=(Get-Location).Path.Length+1; Get-ChildItem -Recurse -File -Force .{inc} | ",
+                        "Where-Object {{ $_.FullName -notmatch '\\\\\\.git\\\\' }} | ",
+                        "Select-String -Pattern {pat} | Select-Object -First {max} | ",
+                        "ForEach-Object {{ $_.Path.Substring($b).Replace('\\','/') + ':' + $_.LineNumber + ':' + $_.Line }}"
+                    ),
+                    inc = inc,
+                    pat = ps_quote(&a.pattern),
+                    max = max
+                )
+            }
         };
         match self.inner().remote.exec(&cmd, Some(&dir), Some(120)).await {
             Ok(out) => {
@@ -695,16 +775,25 @@ impl FarHand {
                 .join("\n")
         };
         let addr = self.inner().remote.address();
+        let (os, shell) = match self.inner().remote.platform().await {
+            Ok(Platform::Windows) => (
+                "windows (remote_bash runs PowerShell; write PowerShell, not bash)".to_string(),
+                "PowerShell".to_string(),
+            ),
+            Ok(Platform::Posix) => ("posix".to_string(), c.remote.shell.join(" ")),
+            Err(e) => (format!("unknown ({e})"), c.remote.shell.join(" ")),
+        };
         Ok(ok(format!(
             "host: {}\nreachable from the user's machine as: {} (ssh port {})\nworkdir: {}\n\
-             connected: {}\nshell: {}\ncommand timeout: {}s (max {}s)\n\
+             os: {}\nconnected: {}\nshell: {}\ncommand timeout: {}s (max {}s)\n\
              allowed local directories:\n{}\naudit log: {}\nbuilt-in upload excludes: {}",
             c.remote.host,
             addr.hostname,
             addr.port,
             workdir,
+            os,
             connected,
-            c.remote.shell.join(" "),
+            shell,
             c.limits.command_timeout_secs,
             c.limits.max_command_timeout_secs,
             roots,
@@ -786,6 +875,22 @@ fn local_hint(e: Error) -> Error {
 
 fn ok(text: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
+/// A `**/*.rs`-style glob as a PowerShell `-like` pattern over `/`-joined
+/// relative paths: `*` already crosses directories there, so `**/` folds
+/// into it.
+fn glob_to_like(glob: &str) -> String {
+    let g = glob.trim_start_matches("./");
+    let g = g.replace("**/", "*").replace("**", "*");
+    // `-like` treats `[` as a character class, like a glob does; nothing
+    // else needs escaping.
+    if g.contains('/') || g.starts_with('*') {
+        g
+    } else {
+        // A bare name matches at any depth, as `find -name` would.
+        format!("*{g}")
+    }
 }
 
 fn exec_result(out: &ExecOutput) -> CallToolResult {
