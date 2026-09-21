@@ -459,15 +459,12 @@ impl Config {
         if let Some(d) = &self.audit.log_dir {
             self.audit.log_dir = Some(expand_home(d));
         }
-        // `remote_bash` was the tool's name before 0.2.1; keep old configs
-        // working.
-        if let Some(m) = self.approval.tools.remove("remote_bash") {
-            self.approval
-                .tools
-                .entry("remote_shell".into())
-                .or_insert(m);
-        }
         for (t, m) in &self.approval.tools {
+            if t == "remote_bash" {
+                return Err(Error::Config(
+                    "approval.tools: `remote_bash` was renamed to `remote_shell` in 0.2.1".into(),
+                ));
+            }
             if !MUTATING_TOOLS.contains(&t.as_str()) && !READ_ONLY_TOOLS.contains(&t.as_str()) {
                 return Err(Error::Config(format!(
                     "approval.tools: `{t}` is not a tool (one of {}, {})",
@@ -640,12 +637,15 @@ mod tests {
     }
 
     #[test]
-    fn remote_bash_is_an_alias_for_remote_shell() {
-        let cfg = Config::parse(
-            "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'\ntools={ remote_bash='ask' }",
+    fn old_tool_name_points_at_the_new_one() {
+        let err = Config::parse(
+            "[remote]\nhost='h'\nworkdir='/'\n[approval]\ntools={ remote_bash='ask' }",
         )
-        .unwrap();
-        assert_eq!(cfg.approval.effective()["remote_shell"], ApprovalMode::Ask);
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("renamed to `remote_shell`"),
+            "{err}"
+        );
     }
 
     #[test]
