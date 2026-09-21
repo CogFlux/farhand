@@ -668,6 +668,12 @@ fn encode_utf16_b64(script: &str) -> String {
 /// working directory set, UTF-8 output and colour off. Output flows through
 /// inherited handles, so nothing is buffered in files.
 ///
+/// UTF-8 is set on the console (both code pages) and, because a program
+/// whose stdout is a pipe consults its locale rather than the console,
+/// also for Python through `PYTHONUTF8`/`PYTHONIOENCODING`; the model reads
+/// what such programs print, and on a `cp1252` machine that is otherwise
+/// a `UnicodeEncodeError` for any non-Latin text.
+///
 /// The inner script must end naturally: `exit` from a `-EncodedCommand`
 /// script discards output still in PowerShell's formatting pipeline. So the
 /// last thing it prints is [`WIN_EXIT_MARKER`] with the status, which
@@ -680,8 +686,9 @@ fn encode_utf16_b64(script: &str) -> String {
 fn windows_wrapper(exe: &str, extra: &[String], cwd: &str, command: &str, timeout: u64) -> String {
     let inner = format!(
         "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Continue'\n\
-         [Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8\n\
-         $env:NO_COLOR='1'\n\
+         [Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::InputEncoding=[Text.Encoding]::UTF8; \
+         $OutputEncoding=[Text.Encoding]::UTF8\n\
+         $env:NO_COLOR='1'; $env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'\n\
          try {{ Set-Location -LiteralPath {cwd} -ErrorAction Stop }} \
          catch {{ [Console]::Error.WriteLine('cannot cd'); exit {CD_FAILED_EXIT} }}\n\
          $global:LASTEXITCODE=0\n\
