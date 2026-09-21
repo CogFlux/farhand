@@ -267,6 +267,15 @@ impl FarHand {
         Ok((detected, self.inner().remote.configured_platform()))
     }
 
+    /// The workdir with `~` expanded, and whether connecting just created it.
+    pub async fn workdir_state(&self) -> farhand_core::Result<(String, bool)> {
+        let remote = &self.inner().remote;
+        Ok((
+            remote.effective_workdir().await?,
+            remote.workdir_created().await?,
+        ))
+    }
+
     async fn platform_and_rg(&self) -> farhand_core::Result<(Platform, bool)> {
         let platform = self.inner().remote.platform().await?;
         let has_rg = self.inner().remote.has_tool("rg").await?;

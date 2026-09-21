@@ -101,6 +101,9 @@ struct Conn {
     home: String,
     /// The configured workdir with `~` expanded to `home`, native form.
     workdir: String,
+    /// The workdir did not exist when this connection was made and was
+    /// created then.
+    workdir_created: bool,
 }
 
 pub struct Remote {
@@ -174,6 +177,12 @@ impl Remote {
     /// The workdir with `~` expanded; connects if needed.
     pub async fn effective_workdir(&self) -> Result<String> {
         Ok(self.conn().await?.workdir.clone())
+    }
+
+    /// Whether the workdir was missing and got created when the current
+    /// connection was made; connects if needed.
+    pub async fn workdir_created(&self) -> Result<bool> {
+        Ok(self.conn().await?.workdir_created)
     }
 
     pub fn limits(&self) -> &Limits {
@@ -291,6 +300,19 @@ impl Remote {
             }
         };
         let workdir = normalize_for(platform, &expand_tilde(&self.cfg.workdir, &home));
+        // A missing workdir would make every command fail at `cd`. It is a
+        // path the user wrote into the config, so creating it is what they
+        // meant; anything already there that is not a directory is an error.
+        let workdir_created = self
+            .ensure_dir_on(&sftp, platform, &workdir)
+            .await
+            .map_err(|e| match e {
+                Error::Invalid(m) => Error::Invalid(format!("remote.workdir: {m}")),
+                e => Error::Ssh(format!("cannot create remote.workdir `{workdir}`: {e}")),
+            })?;
+        if workdir_created {
+            tracing::info!(host = %self.cfg.host, "created the working directory {workdir}");
+        }
         let conn = Arc::new(Conn {
             session,
             sftp,
@@ -298,6 +320,7 @@ impl Remote {
             login_shell,
             home,
             workdir,
+            workdir_created,
         });
         *slot = Some(conn.clone());
         tracing::info!(host = %self.cfg.host, platform = platform.name(), "connected");
@@ -508,8 +531,16 @@ impl Remote {
     /// native path.
     pub async fn ensure_dir(&self, dir: &str) -> Result<()> {
         let conn = self.conn().await?;
+        self.ensure_dir_on(&conn.sftp, conn.platform, dir)
+            .await
+            .map(|_| ())
+    }
+
+    /// `ensure_dir` on a given SFTP session, usable while the connection is
+    /// still being set up. Returns whether anything was created.
+    async fn ensure_dir_on(&self, sftp: &Sftp, platform: Platform, dir: &str) -> Result<bool> {
         if self.known_dirs.lock().await.contains(dir) {
-            return Ok(());
+            return Ok(false);
         }
         // Walk up to the nearest existing ancestor, then create downwards.
         let mut missing: Vec<String> = Vec::new();
@@ -519,12 +550,7 @@ impl Remote {
                 break;
             }
             let _permit = self.channels.acquire().await.expect("semaphore open");
-            match conn
-                .sftp
-                .fs()
-                .metadata(to_sftp_path(conn.platform, &cur))
-                .await
-            {
+            match sftp.fs().metadata(to_sftp_path(platform, &cur)).await {
                 Ok(m) => {
                     if !m.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         return Err(Error::Invalid(format!(
@@ -536,26 +562,21 @@ impl Remote {
                 }
                 Err(_) => {
                     missing.push(cur.clone());
-                    match parent_of(conn.platform, &cur) {
+                    match parent_of(platform, &cur) {
                         Some(p) => cur = p,
                         None => break,
                     }
                 }
             }
         }
+        let mut created = false;
         for d in missing.into_iter().rev() {
             let _permit = self.channels.acquire().await.expect("semaphore open");
-            if let Err(e) = conn
-                .sftp
-                .fs()
-                .create_dir(to_sftp_path(conn.platform, &d))
-                .await
-            {
+            if let Err(e) = sftp.fs().create_dir(to_sftp_path(platform, &d)).await {
                 // Another call may have created it meanwhile.
-                let exists = conn
-                    .sftp
+                let exists = sftp
                     .fs()
-                    .metadata(to_sftp_path(conn.platform, &d))
+                    .metadata(to_sftp_path(platform, &d))
                     .await
                     .map(|m| m.file_type().map(|t| t.is_dir()).unwrap_or(false))
                     .unwrap_or(false);
@@ -564,8 +585,9 @@ impl Remote {
                 }
             }
             self.known_dirs.lock().await.insert(d);
+            created = true;
         }
-        Ok(())
+        Ok(created)
     }
 
     pub async fn exists(&self, path: &str) -> Result<Option<bool>> {

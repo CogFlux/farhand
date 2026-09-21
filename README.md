@@ -78,7 +78,7 @@ See `docs/USAGE.md` for the step-by-step guide and per-agent configuration.
 ```toml
 [remote]
 host = "devbox"            # an alias from ~/.ssh/config, or user@host
-workdir = "~/proj"         # commands start here; relative paths resolve here
+workdir = "~/proj"         # commands start here; relative paths resolve here; created if missing
 
 [local]
 allowed_dirs = ["."]       # the only local folders the model may see; "." = this folder

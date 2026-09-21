@@ -546,7 +546,8 @@ const EXAMPLE: &str = r#"# FarHand configuration.
 # agent forwarding all come from your OpenSSH config.
 host = "devbox"
 # Directory on the remote where every command starts and relative paths
-# resolve. Absolute, or `~/...` for the remote user's home.
+# resolve. Absolute, or `~/...` for the remote user's home. Created on
+# first connection if it does not exist.
 workdir = "~/project"
 # os = "auto"              # "posix" or "windows"; detected on connect, but set it so
 #                          # the model knows which shell it is writing for

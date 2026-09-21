@@ -46,7 +46,7 @@ The three lines that matter:
 ```toml
 [remote]
 host = "devbox"            # alias from ~/.ssh/config, or user@host
-workdir = "~/myapp"        # where commands start; relative paths resolve here
+workdir = "~/myapp"        # where commands start; relative paths resolve here; created if missing
 
 [local]
 allowed_dirs = ["."]       # this folder; or e.g. ["~/FarHand-Outbox", "assets"]

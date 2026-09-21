@@ -197,7 +197,21 @@ async fn main() -> anyhow::Result<()> {
                 cfg.remote.host,
                 platform.name()
             );
-            println!("workdir:    {}", cfg.remote.workdir);
+            let (workdir, created) = server.workdir_state().await?;
+            println!(
+                "workdir:    {}{}{}",
+                cfg.remote.workdir,
+                if workdir != cfg.remote.workdir {
+                    format!(" (= {workdir})")
+                } else {
+                    String::new()
+                },
+                if created {
+                    " — did not exist, created now"
+                } else {
+                    ""
+                }
+            );
             println!(
                 "approval:   {}",
                 format!("{:?}", cfg.approval.mode).to_lowercase()
