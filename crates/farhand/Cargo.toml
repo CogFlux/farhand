@@ -21,7 +21,7 @@ bin-dir = "farhand-{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [dependencies]
-farhand-core = { path = "../farhand-core", version = "0.2.5" }
+farhand-core = { path = "../farhand-core", version = "0.2.6" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
