@@ -32,11 +32,14 @@ import { join } from "node:path"
 /**
  * Tools that touch the local machine, across both versions. V2 renamed
  * `bash` to `shell` and dropped `list`; its `browser_*` tools drive a local
- * browser, which can open `file://` URLs and read local files.
+ * browser, which can open `file://` URLs and read local files. V2's Code
+ * Mode `execute` runs model-written JavaScript whose `fetch` reads
+ * `file://` URLs too (verified on 2.0.14).
  */
 const LOCAL_TOOLS = new Set([
   "bash",
   "shell",
+  "execute",
   "read",
   "write",
   "edit",
@@ -54,7 +57,7 @@ function isLocalTool(id: string): boolean {
 }
 
 function refusal(tool: string): string {
-  const remote: Record<string, string> = { bash: "remote_shell", shell: "remote_shell", list: "remote_ls", ls: "remote_ls" }
+  const remote: Record<string, string> = { bash: "remote_shell", shell: "remote_shell", list: "remote_ls", ls: "remote_ls", execute: "remote_shell" }
   const hint = remote[tool] ?? (LOCAL_TOOLS.has(tool) ? `remote_${tool}` : undefined)
   return (
     `FarHand: local tool "${tool}" is disabled in this session.` +
@@ -243,11 +246,28 @@ async function setupV2(ctx: any) {
     }
   })
 
+  // Code Mode exposes MCP tools through `execute`, a JavaScript sandbox
+  // whose `fetch` can read local files. With it off for every server, the
+  // user's other MCP tools are offered directly instead and no `execute`
+  // tool is needed; the fence below refuses it if one appears anyway.
+  await ctx.mcp.transform((editor: any) => {
+    for (const [name] of editor.list()) {
+      editor.update(name, (config: any) => {
+        config.codemode = false
+      })
+    }
+  })
+
   if (!s.problem) {
     await ctx.mcp.transform((editor: any) => {
       editor.set("farhand", {
         type: "local",
         command: s.command,
+        // Direct tools, not Code Mode: the model then calls
+        // farhand_remote_shell and friends by the names the system prompt
+        // and FarHand's own instructions use, and each call meets its own
+        // permission rule.
+        codemode: false,
         timeout: {
           // Tool discovery waits for the SSH preflight; give slow hosts room.
           startup: 60_000,

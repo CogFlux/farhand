@@ -124,9 +124,9 @@ development). The one file carries both plugin APIs, so it works with
 OpenCode 1.18.29+ and OpenCode 2 alike and survives an upgrade between them.
 The plugin registers the MCP server, removes OpenCode's local tools
 (`bash`/`shell`, `read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`,
-the LSP tools, and in OpenCode 2 the `browser_*` tools, since a local
-browser can open `file://` URLs), refuses them again at call time as a
-second fence, and tells the model in the system prompt that it is working
+the LSP tools, and in OpenCode 2 the `browser_*` tools and Code Mode's
+`execute`, since a local browser and `execute`'s `fetch` can both open
+`file://` URLs), refuses them again at call time as a second fence, and tells the model in the system prompt that it is working
 remotely.
 
 Approval is FarHand's knob, not the agent's: `[approval] mode = "ask"`

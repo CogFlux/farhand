@@ -174,8 +174,10 @@ an ordinary local session with only a warning in its log.
 
 The plugin registers the MCP server, removes `bash`/`shell`, `read`,
 `write`, `edit`, `multiedit`, `patch`, `glob`, `grep`, `list`, the LSP
-tools and (OpenCode 2) the `browser_*` tools, refuses them again at call
-time, translates `[approval]` into OpenCode's permissions, and tells the
+tools and (OpenCode 2) the `browser_*` tools, turns Code Mode off for every
+MCP server (its `execute` sandbox can `fetch` `file://` URLs, so `execute`
+is refused as well; your other MCP tools are offered directly instead),
+refuses all of these again at call time, translates `[approval]` into OpenCode's permissions, and tells the
 model in the system prompt that it is working remotely. On OpenCode 1 a
 `farhand*` key you set yourself in `opencode.jsonc` wins; on OpenCode 2 a
 tool FarHand marks "ask" always asks unless you deny it, and "auto" leaves
