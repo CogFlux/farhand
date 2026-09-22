@@ -139,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
                         "active": l.active(),
                         "host": l.config.remote.host,
                         "workdir": l.config.remote.workdir,
+                    "max_command_timeout_secs": l.config.limits.max_command_timeout_secs,
                         "approval": l.config
                             .approval
                             .effective()

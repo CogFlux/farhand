@@ -120,10 +120,14 @@ makes every session remote. What each agent gets is in `docs/USAGE.md`.
 
 `farhand install opencode` writes `plugins/opencode/farhand.ts` into
 `~/.config/opencode/plugins/` (or symlink it there yourself for
-development). The plugin registers the MCP server, disables OpenCode's local
-`bash`, `read`, `write`, `edit`, `glob`, `grep`, `list` and `patch` tools,
-refuses them again at call time as a second fence, and tells the model in the
-system prompt that it is working remotely.
+development). The one file carries both plugin APIs, so it works with
+OpenCode 1.18.29+ and OpenCode 2 alike and survives an upgrade between them.
+The plugin registers the MCP server, removes OpenCode's local tools
+(`bash`/`shell`, `read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`,
+the LSP tools, and in OpenCode 2 the `browser_*` tools, since a local
+browser can open `file://` URLs), refuses them again at call time as a
+second fence, and tells the model in the system prompt that it is working
+remotely.
 
 Approval is FarHand's knob, not the agent's: `[approval] mode = "ask"`
 (default) makes the agent prompt before `remote_shell`, `remote_write`,
@@ -133,7 +137,9 @@ prompts for everything, reads included; `tools = { remote_write = "auto" }`
 overrides per tool. The plugin translates this into OpenCode's permission
 system at startup.
 
-Without the plugin, the same effect comes from `opencode.jsonc`:
+Without the plugin, the same effect comes from `opencode.jsonc` (OpenCode 1
+format shown; OpenCode 2 reads it too, but cannot remove `browser_*` from
+config alone — use the plugin there):
 
 ```jsonc
 {

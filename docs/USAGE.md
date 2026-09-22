@@ -167,16 +167,26 @@ directory.
 `farhand install opencode` writes the plugin to
 `~/.config/opencode/plugins/farhand.ts` with the binary path baked in. If
 that path is already a symlink (a development checkout), it is left alone.
-Restart OpenCode.
+Restart OpenCode. The same file serves OpenCode 1.18.29+ and OpenCode 2;
+after upgrading OpenCode, run `farhand install opencode` once more — an
+older FarHand plugin does not load in OpenCode 2, and OpenCode then starts
+an ordinary local session with only a warning in its log.
 
-The plugin registers the MCP server, disables `bash`, `read`, `write`,
-`edit`, `multiedit`, `patch`, `glob`, `grep`, `list` and the LSP tools,
-refuses them again at call time, translates `[approval]` into OpenCode's
-`permission` rules (a `farhand*` key you set yourself in `opencode.jsonc`
-wins), and tells the model in the system prompt that it is working remotely.
-It runs `farhand validate` first: a config that does not parse shows a toast
-with the reason, registers nothing, and still keeps the local tools off, so
-a session never silently falls back to local execution. `opencode run`
+The plugin registers the MCP server, removes `bash`/`shell`, `read`,
+`write`, `edit`, `multiedit`, `patch`, `glob`, `grep`, `list`, the LSP
+tools and (OpenCode 2) the `browser_*` tools, refuses them again at call
+time, translates `[approval]` into OpenCode's permissions, and tells the
+model in the system prompt that it is working remotely. On OpenCode 1 a
+`farhand*` key you set yourself in `opencode.jsonc` wins; on OpenCode 2 a
+tool FarHand marks "ask" always asks unless you deny it, and "auto" leaves
+OpenCode's own rules in charge. The MCP call timeout is set from
+`max_command_timeout_secs`, so a long `remote_shell` is ended by FarHand,
+not cut off by OpenCode.
+
+It runs `farhand validate` first: a config that does not parse registers
+nothing and still keeps the local tools off, so a session never silently
+falls back to local execution; OpenCode 1 shows the reason in a toast, and
+both versions give it to the model to relay. `opencode run`
 (non-interactive) auto-rejects anything set to ask.
 
 To use OpenCode locally again, `farhand uninstall opencode`, or install into

@@ -4,7 +4,7 @@
 //!
 //! | agent         | registers the MCP server        | closes local tools                          | second fence / approval                 |
 //! |---------------|---------------------------------|---------------------------------------------|-----------------------------------------|
-//! | `opencode`    | plugin file (embedded here)     | plugin `config` hook                        | plugin `tool.execute.before`            |
+//! | `opencode`    | plugin file (embedded here)     | plugin: V1 `config` hook, V2 `tool.transform` | plugin `tool.execute.before` (V1 and V2) |
 //! | `claude-code` | `claude mcp add` / `.mcp.json`  | `permissions.deny` (project scope only)     | `PreToolUse` hook (`farhand hook`)      |
 //! | `codex`       | `[mcp_servers.farhand]` in TOML | `features.shell_tool = false` + read-only sandbox (project scope only) | `tools.<t>.approval_mode` from `[approval]` |
 //!
