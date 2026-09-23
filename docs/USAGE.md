@@ -180,8 +180,10 @@ is refused as well; your other MCP tools are offered directly instead),
 refuses all of these again at call time, translates `[approval]` into OpenCode's permissions, and tells the
 model in the system prompt that it is working remotely. On OpenCode 1 a
 `farhand*` key you set yourself in `opencode.jsonc` wins; on OpenCode 2 a
-tool FarHand marks "ask" always asks unless you deny it, and "auto" leaves
-OpenCode's own rules in charge. The MCP call timeout is set from
+tool FarHand marks "ask" gets a default "ask" rule in every agent unless a
+rule of yours names it or already denies it. On both, "Always allow" in the
+prompt is remembered as usual, and "auto" leaves OpenCode's own rules in
+charge. The MCP call timeout is set from
 `max_command_timeout_secs`, so a long `remote_shell` is ended by FarHand,
 not cut off by OpenCode.
 

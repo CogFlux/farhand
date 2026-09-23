@@ -233,6 +233,19 @@ async function serverV1(input: any, options?: Record<string, unknown>) {
 
 // ---- OpenCode 2 -------------------------------------------------------------
 
+/** One entry of an OpenCode 2 agent's `permissions`; the last match wins. */
+interface PermissionRule {
+  action: string
+  resource: string
+  effect: "allow" | "ask" | "deny"
+}
+
+/** OpenCode's permission pattern match: `*` is any run of characters, `?` one. */
+function wildcard(pattern: string, value: string): boolean {
+  const re = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")
+  return new RegExp(`^${re}$`, "s").test(value)
+}
+
 async function setupV2(ctx: any) {
   const location = ctx.location ?? {}
   const s = await prepare([location.project?.directory, location.directory], ctx.options)
@@ -285,13 +298,26 @@ async function setupV2(ctx: any) {
     if (isLocalTool(event.tool)) throw new Error(refusal(event.tool))
   })
 
-  // "ask" in farhand.toml always prompts (a rule that denies still
-  // denies); "auto" leaves OpenCode's own decision, so a stricter rule the
-  // user wrote in opencode.jsonc still holds.
-  await ctx.permission.hook("evaluate", (event: { action: string; effect: string }) => {
-    if (!event.action.startsWith("farhand_")) return
-    const mode = s.approval[event.action.slice("farhand_".length)]
-    if (mode === "ask" && event.effect !== "deny") event.effect = "ask"
+  // "ask" in farhand.toml becomes a default rule in every agent's
+  // permissions, as V1's config key did. OpenCode appends saved "Always
+  // allow" approvals after these rules, so a click still sticks; a rule the
+  // user wrote for the tool, or a deny that already covers it, is left in
+  // charge. "auto" adds nothing and leaves OpenCode's own decision.
+  const askTools = Object.entries(s.approval)
+    .filter(([, mode]) => mode === "ask")
+    .map(([tool]) => `farhand_${tool}`)
+  await ctx.agent.transform((editor: any) => {
+    for (const agent of editor.list()) {
+      editor.update(agent.id, (a: any) => {
+        const rules: PermissionRule[] = a.permissions
+        for (const action of askTools) {
+          const own = rules.some((r) => r.action !== "*" && wildcard(r.action, action))
+          const last = rules.findLast((r) => wildcard(r.action, action) && r.resource === "*")
+          if (own || last?.effect === "deny") continue
+          rules.push({ action, resource: "*", effect: "ask" })
+        }
+      })
+    }
   })
 
   await ctx.session.hook("context", (event: { system: { type: "text"; text: string }[] }) => {
