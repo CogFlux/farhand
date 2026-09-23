@@ -86,7 +86,8 @@ const SYSTEM_NOTICE = [
   "\"The current directory\", \"here\", \"this project\" and every relative path mean the remote workdir, not this machine.",
   "The user sits at the local machine: a service started on the remote is NOT at localhost for them —",
   "report the remote's address (see farhand_remote_info) or an `ssh -L` tunnel command.",
-  "The local shell, file and browser tools are disabled and will fail if called.",
+  "The local shell, file and browser tools are disabled and will fail if called,",
+  "and so is `execute` (Code Mode): call every MCP tool, farhand_* included, directly by its own name.",
   "Use the farhand_remote_* tools for every command and file operation (farhand_remote_ls to list files).",
   "Use farhand_local_ls / farhand_local_read only when the user explicitly asks about their local folders,",
   "and farhand_upload / farhand_download to move files between them and the remote.",
@@ -97,7 +98,7 @@ const SYSTEM_NOTICE = [
 function problemNotice(problem: string): string {
   return (
     `FarHand is configured for this session but could not start: ${problem}. ` +
-    "Local shell, file and browser tools are disabled and no remote tools are available. " +
+    "Local shell, file and browser tools and `execute` are disabled and no remote tools are available. " +
     "Tell the user to fix the FarHand configuration (run `farhand check`) and do not attempt any file or shell work."
   )
 }
