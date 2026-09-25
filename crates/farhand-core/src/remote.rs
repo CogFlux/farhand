@@ -862,10 +862,15 @@ fn encode_utf16_b64(script: &str) -> String {
 /// last thing it prints is [`WIN_EXIT_MARKER`] with the status, which
 /// [`take_windows_exit_marker`] reads back. The status follows shell
 /// convention: that of the last statement (`$?`), with `$LASTEXITCODE` for
-/// a failed native command. `$Error` is deliberately not consulted: it also
+/// a failed native command. `$Error` is otherwise not consulted: it also
 /// collects every stderr line a native program wrote and every error that
-/// `-ErrorAction SilentlyContinue` hid. A command that calls `exit` itself
-/// skips the marker and its status arrives as the process status instead.
+/// `-ErrorAction SilentlyContinue` hid. The one exception is Windows
+/// PowerShell 5.1 under `2>&1`: it turns a native program's stderr into
+/// `NativeCommandError` records and clears `$?`, so `git ... 2>&1` that
+/// exits 0 would read as a failure; when the newest error is that record
+/// and `$LASTEXITCODE` is 0, the status is 0. A command that calls `exit`
+/// itself skips the marker and its status arrives as the process status
+/// instead.
 fn windows_wrapper(exe: &str, extra: &[String], cwd: &str, command: &str, timeout: u64) -> String {
     let inner = format!(
         "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Continue'\n\
@@ -877,7 +882,8 @@ fn windows_wrapper(exe: &str, extra: &[String], cwd: &str, command: &str, timeou
          $global:LASTEXITCODE=0\n\
          {command}\n\
          $__fh_ok=$?\n\
-         Write-Output \"{WIN_EXIT_MARKER}$(if ($__fh_ok) {{0}} elseif ($LASTEXITCODE) {{$LASTEXITCODE}} else {{1}})\"\n",
+         Write-Output \"{WIN_EXIT_MARKER}$(if ($__fh_ok) {{0}} elseif ($LASTEXITCODE) {{$LASTEXITCODE}} \
+         elseif ($Error.Count -and $Error[0].FullyQualifiedErrorId -like 'NativeCommandError*') {{0}} else {{1}})\"\n",
         cwd = ps_quote(cwd),
     );
     let mut args: Vec<String> = extra.iter().map(|a| ps_quote(a)).collect();
