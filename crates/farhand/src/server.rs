@@ -41,6 +41,10 @@ struct Inner {
     local: LocalScope,
     audit: Audit,
     config: Config,
+    /// Held by `remote_edit` from its read to its write, and by
+    /// `remote_write`, so edits the model sends in parallel apply one after
+    /// another instead of each overwriting the file with its own copy.
+    writes: tokio::sync::Mutex<()>,
 }
 
 // ---- parameters ----------------------------------------------------------
@@ -163,6 +167,7 @@ impl FarHand {
                 local,
                 audit,
                 config,
+                writes: tokio::sync::Mutex::new(()),
             })),
             tool_router: if active {
                 Self::tool_router()
@@ -359,6 +364,7 @@ impl FarHand {
         {
             return Ok(self.deny(rec, started, e));
         }
+        let _writing = self.inner().writes.lock().await;
         match self
             .inner()
             .remote
@@ -395,6 +401,7 @@ impl FarHand {
             return Ok(self.fail(rec, started, Error::Invalid("old_string is empty".into())));
         }
         let max = self.inner().remote.limits().max_read_bytes;
+        let _writing = self.inner().writes.lock().await;
         let (bytes, len) = match self.inner().remote.read_file(&a.path, max).await {
             Ok(r) => r,
             Err(e) => return Ok(self.fail(rec, started, e)),

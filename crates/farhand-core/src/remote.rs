@@ -516,14 +516,15 @@ impl Remote {
             .map_err(|e| not_found(&path, e))?;
         let want = (len as usize).min(max);
         let mut buf = BytesMut::with_capacity(want);
-        let mut remaining = want;
-        while remaining > 0 {
-            let chunk = remaining.min(256 * 1024) as u32;
+        while buf.len() < want {
+            // `File::read` advances the offset by the amount asked for, not
+            // the amount returned, and servers may return less (Windows
+            // OpenSSH does): seek to what actually arrived before each read.
+            file.seek(std::io::SeekFrom::Start(buf.len() as u64))
+                .await?;
+            let chunk = (want - buf.len()).min(256 * 1024) as u32;
             match file.read(chunk, buf.split_off(buf.len())).await? {
-                Some(bytes) => {
-                    remaining -= bytes.len();
-                    buf.unsplit(bytes);
-                }
+                Some(bytes) => buf.unsplit(bytes),
                 None => break,
             }
         }
@@ -658,6 +659,9 @@ impl Remote {
                 file.seek(std::io::SeekFrom::Start(offset)).await?;
                 let mut buf = BytesMut::with_capacity(want as usize);
                 while (buf.len() as u64) < want {
+                    // Short reads: see `read_file`.
+                    file.seek(std::io::SeekFrom::Start(offset + buf.len() as u64))
+                        .await?;
                     let n = (want - buf.len() as u64).min(256 * 1024) as u32;
                     match file.read(n, buf.split_off(buf.len())).await? {
                         Some(bytes) => buf.unsplit(bytes),
