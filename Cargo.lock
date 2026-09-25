@@ -261,6 +261,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "globset",
+ "libc",
  "openssh",
  "openssh-sftp-client",
  "regex",

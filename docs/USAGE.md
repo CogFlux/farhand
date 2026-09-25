@@ -49,7 +49,7 @@ host = "devbox"            # alias from ~/.ssh/config, or user@host
 workdir = "~/myapp"        # where commands start; relative paths resolve here; created if missing
 
 [local]
-allowed_dirs = ["."]       # this folder; or e.g. ["~/FarHand-Outbox", "assets"]
+allowed_dirs = ["."]       # this folder; or e.g. [".", "assets"]
 ```
 
 `farhand check` connects once and summarises the setup; `farhand check -v` also
@@ -63,7 +63,17 @@ project the local folder holds nothing but `.farhand.toml`, so `"."` turns it
 into the project's local pocket: files you drop there can be uploaded, and
 downloads land there (`.farhand.toml` itself stays invisible to the model).
 Relative entries are resolved against the `.farhand.toml` and may not contain
-`..`; `/` and `~` are refused; the global config takes absolute paths only.
+`..`. A project file may only name its own folder or folders inside it;
+absolute and `~/...` entries (a shared `~/FarHand-Outbox`, say) go in the
+global config, which takes absolute paths only. `/`, the home directory and
+any folder above it are refused everywhere.
+
+A `.farhand.toml` can arrive with a cloned repository, so it may only
+tighten the global config (or the defaults, without one): `[approval]` no
+looser, local folders only inside its own directory, and no `audit.log_dir`.
+The global `[guard]` lists stay in force; a project can add to them. What a
+project file tries beyond that is ignored, and `farhand check` / `farhand
+validate` print a `note:` for each such setting.
 Do not point it at a real local checkout unless you mean to hand the model
 every non-credential file in it, and treat a `.farhand.toml` found in a
 repository you did not write like a `.vscode/tasks.json`: read it before
@@ -218,7 +228,8 @@ FarHand config that applies to the hook's working directory (a
 `.farhand.toml` there, else the usual resolution): `allow` for `auto`, `ask`
 for `ask`; `strict` makes reads ask too. The config is read on every call, so
 changes take effect without reinstalling. `claude -p` (non-interactive)
-cannot answer a prompt, so use `mode = "auto"` there.
+cannot answer a prompt, so use `mode = "auto"` there, in the global config
+or one passed with `--config` (a project file cannot loosen approval).
 
 With the default `activation = "project"`, a user-scope install changes
 nothing in directories without a `.farhand.toml`: the hook refuses nothing

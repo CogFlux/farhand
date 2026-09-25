@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 #[derive(Debug, Serialize)]
 pub struct Record<'a> {
@@ -41,8 +41,23 @@ pub struct Audit {
 }
 
 impl Audit {
+    /// Open the log in `dir`, creating it and today's file. A log that
+    /// cannot be written is an error here, at startup: the alternative is a
+    /// session whose every record quietly goes nowhere.
     pub fn open(dir: PathBuf, host: &str) -> Result<Self> {
-        std::fs::create_dir_all(&dir)?;
+        let unwritable = |e: std::io::Error| {
+            Error::Config(format!(
+                "the audit log directory {} is not writable: {e}",
+                dir.display()
+            ))
+        };
+        std::fs::create_dir_all(&dir).map_err(unwritable)?;
+        let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(format!("{day}.jsonl")))
+            .map_err(unwritable)?;
         let session = format!(
             "{}-{}",
             chrono::Utc::now().format("%Y%m%dT%H%M%S"),
@@ -52,7 +67,7 @@ impl Audit {
             dir,
             session,
             host: host.to_string(),
-            file: Mutex::new(None),
+            file: Mutex::new(Some((day, file))),
         })
     }
 
@@ -148,5 +163,14 @@ mod tests {
         assert_eq!(v["host"], "devbox");
         assert_eq!(v["command"], "ls");
         assert!(v["path"].is_null());
+    }
+
+    #[test]
+    fn unwritable_dir_fails_at_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, "").unwrap();
+        let err = Audit::open(file.join("audit"), "devbox").err().unwrap();
+        assert!(err.to_string().contains("not writable"), "{err}");
     }
 }

@@ -139,7 +139,8 @@ async fn main() -> anyhow::Result<()> {
                         "active": l.active(),
                         "host": l.config.remote.host,
                         "workdir": l.config.remote.workdir,
-                    "max_command_timeout_secs": l.config.limits.max_command_timeout_secs,
+                        "max_command_timeout_secs": l.config.limits.max_command_timeout_secs,
+                        "notices": l.notices,
                         "approval": l.config
                             .approval
                             .effective()
@@ -175,6 +176,9 @@ async fn main() -> anyhow::Result<()> {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+            for n in &l.notices {
+                println!("note: {n}");
+            }
             Ok(())
         }
         // A diagnostic for the user: does the config load, does the host
@@ -190,6 +194,9 @@ async fn main() -> anyhow::Result<()> {
                 l.path.display(),
                 l.active()
             );
+            for n in &l.notices {
+                println!("note:       {n}");
+            }
             let server = FarHand::new(l.config, true)?;
             server.preflight().await?;
             let (platform, configured) = server.detected_platform().await?;
@@ -215,7 +222,12 @@ async fn main() -> anyhow::Result<()> {
             );
             println!(
                 "approval:   {}",
-                format!("{:?}", cfg.approval.mode).to_lowercase()
+                cfg.approval
+                    .effective()
+                    .iter()
+                    .map(|(k, v)| format!("{k}={}", v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             println!(
                 "local dirs: {}",
@@ -254,6 +266,9 @@ async fn main() -> anyhow::Result<()> {
                 Ok(l) => {
                     let active = l.active();
                     tracing::info!(config = %l.path.display(), host = %l.config.remote.host, active, "farhand starting");
+                    for n in &l.notices {
+                        tracing::warn!("{n}");
+                    }
                     FarHand::new(l.config, active)?
                 }
                 Err(farhand_core::Error::NoConfig) => {

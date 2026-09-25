@@ -16,7 +16,7 @@
 
 use std::path::{Component, Path};
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
 
 use crate::config::GuardConfig;
@@ -198,6 +198,10 @@ const SCAN_CHUNK: usize = 1024 * 1024;
 /// credential a `deny_content` pattern is meant to catch, is far shorter.
 const SCAN_OVERLAP: usize = 64 * 1024;
 
+fn any_case(pattern: &str) -> std::result::Result<Glob, globset::Error> {
+    GlobBuilder::new(pattern).case_insensitive(true).build()
+}
+
 /// Fill `buf` from `r` as far as the data goes; short only at EOF.
 fn read_up_to(r: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
@@ -222,13 +226,15 @@ pub struct Guard {
 
 impl Guard {
     pub fn new(cfg: &GuardConfig) -> Result<Self> {
+        // Case-insensitive: on the default macOS and Windows volumes
+        // `OPENCODE.JSONC` is the same file as `opencode.jsonc`.
         let mut names = GlobSetBuilder::new();
         for n in DENIED_NAMES {
-            names.add(Glob::new(n).map_err(|e| Error::Config(e.to_string()))?);
+            names.add(any_case(n).map_err(|e| Error::Config(e.to_string()))?);
         }
         let mut extra = GlobSetBuilder::new();
         for g in &cfg.deny_globs {
-            extra.add(Glob::new(g).map_err(|e| Error::Config(format!("guard.deny_globs: {e}")))?);
+            extra.add(any_case(g).map_err(|e| Error::Config(format!("guard.deny_globs: {e}")))?);
         }
         // ASCII semantics for `\b` and `\s`: every credential shape above is
         // ASCII, and a Unicode word boundary makes the regex engine abandon
@@ -413,6 +419,33 @@ mod tests {
         let err = g.ensure_upload_file(&dirty).unwrap_err().to_string();
         assert!(err.contains("aws-access-key"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn names_match_in_any_case() {
+        let g = Guard::new(&GuardConfig {
+            deny_globs: vec!["*.corp".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        // None of these exist: the check is on the name a download would
+        // create or an upload would send.
+        for name in [
+            "OPENCODE.JSONC",
+            "OpenCode.json",
+            ".ENV",
+            ".Env.Local",
+            "ID_RSA",
+            "Server.PEM",
+            ".FARHAND.TOML",
+            ".MCP.json",
+            "Notes.CORP",
+        ] {
+            let rel = PathBuf::from("dl").join(name);
+            assert!(g.check_path(&rel).is_some(), "{name}");
+            assert!(g.check_download_target(&rel).is_some(), "{name}");
+        }
+        assert!(g.check_path(Path::new("dl/README.md")).is_none());
     }
 
     #[test]

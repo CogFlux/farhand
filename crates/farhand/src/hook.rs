@@ -168,10 +168,22 @@ mod tests {
 
     #[test]
     fn farhand_tools_follow_approval() {
-        let d = cfg_dir("mode='ask'\ntools={ remote_write='auto' }");
-        assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_shell")), "ask");
-        assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_write")), "allow");
-        assert_eq!(kind(&call(d.path(), "mcp__farhand__remote_read")), "allow");
+        // `auto` for a mutating tool comes from a config the user chose,
+        // never from a project file.
+        let d = tempfile::tempdir().unwrap();
+        let explicit = d.path().join("fh.toml");
+        std::fs::write(
+            &explicit,
+            "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='ask'\ntools={ remote_write='auto' }\n",
+        )
+        .unwrap();
+        let call_with = |tool: &str| {
+            let input = serde_json::json!({ "cwd": d.path(), "tool_name": tool, "tool_input": {} });
+            respond(&input.to_string(), Some(&explicit)).map(|s| serde_json::from_str(&s).unwrap())
+        };
+        assert_eq!(kind(&call_with("mcp__farhand__remote_shell")), "ask");
+        assert_eq!(kind(&call_with("mcp__farhand__remote_write")), "allow");
+        assert_eq!(kind(&call_with("mcp__farhand__remote_read")), "allow");
         let strict = cfg_dir("mode='strict'");
         assert_eq!(
             kind(&call(strict.path(), "mcp__farhand__remote_read")),
@@ -200,6 +212,7 @@ mod tests {
             config: cfg,
             path: PathBuf::new(),
             source: Source::Global,
+            notices: Vec::new(),
         };
         assert!(!l.active());
     }

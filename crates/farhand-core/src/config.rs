@@ -12,6 +12,12 @@
 //! came from: a project file, an explicit path or the environment always
 //! activate; the global file activates only when its `activation` is
 //! `"always"` rather than the default `"project"`.
+//!
+//! A project file (any file named `.farhand.toml`, however it was found)
+//! can arrive with a cloned repository, so it may only tighten what the
+//! global config allows: it cannot loosen `[approval]`, allow local
+//! folders outside its own directory, or move the audit log. Such settings
+//! are ignored and reported in [`Loaded::notices`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -201,6 +207,9 @@ pub struct Loaded {
     pub config: Config,
     pub path: PathBuf,
     pub source: Source,
+    /// Settings a project file tried and was not allowed to make, in words
+    /// for the user. Empty for every other source.
+    pub notices: Vec<String>,
 }
 
 impl Loaded {
@@ -318,6 +327,11 @@ impl Config {
     /// for in `cwd` (default: the process's working directory).
     pub fn load_in(cwd: Option<&Path>, explicit: Option<&Path>) -> Result<Loaded> {
         let (path, source) = match explicit {
+            // An agent entry may hand the project file over by path; it is
+            // still a project file and gets no more trust for that.
+            Some(p) if p.file_name() == Some(".farhand.toml".as_ref()) => {
+                (p.to_path_buf(), Source::Project)
+            }
             Some(p) => (p.to_path_buf(), Source::Explicit),
             None => Self::locate(cwd)?,
         };
@@ -330,12 +344,111 @@ impl Config {
             Source::Global => None,
             _ => path.parent().map(Path::to_path_buf),
         };
-        let config = Self::parse_at(&text, base.as_deref())?;
+        let (config, notices) = if source == Source::Project {
+            let global = Self::global_path();
+            let mut notices = Vec::new();
+            let baseline = if global.is_file() {
+                match std::fs::read_to_string(&global)
+                    .map_err(Error::from)
+                    .and_then(|t| Self::parse(&t))
+                {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        notices.push(format!(
+                            "the global config {} does not load ({e}); the project file is \
+                             measured against the defaults instead",
+                            global.display()
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let (config, more) = Self::parse_project(&text, base.as_deref(), baseline.as_ref())?;
+            notices.extend(more);
+            (config, notices)
+        } else {
+            (Self::parse_at(&text, base.as_deref())?, Vec::new())
+        };
         Ok(Loaded {
             config,
             path,
             source,
+            notices,
         })
+    }
+
+    /// Parse a project file living in `base`, measured against `baseline`
+    /// (the global config, if there is one): settings that would loosen it
+    /// are dropped, and each drop is described in the returned notices.
+    pub fn parse_project(
+        text: &str,
+        base: Option<&Path>,
+        baseline: Option<&Config>,
+    ) -> Result<(Self, Vec<String>)> {
+        let mut cfg: Config = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
+        let mut notices = Vec::new();
+        let requested = std::mem::take(&mut cfg.local.allowed_dirs);
+        for d in requested {
+            if d.is_absolute() || d.to_string_lossy().starts_with('~') {
+                notices.push(format!(
+                    "local.allowed_dirs entry `{}` ignored: a project .farhand.toml may only \
+                     allow folders inside its own directory (`\".\"`, `\"assets\"`); put other \
+                     folders in the global config",
+                    d.display()
+                ));
+            } else {
+                cfg.local.allowed_dirs.push(d);
+            }
+        }
+        if let Some(d) = cfg.audit.log_dir.take() {
+            notices.push(format!(
+                "audit.log_dir `{}` ignored: only the global config may move the audit log",
+                d.display()
+            ));
+        }
+        cfg.validate(base)?;
+        cfg.audit.log_dir = baseline.and_then(|b| b.audit.log_dir.clone());
+
+        let floor = baseline.map(|b| b.approval.clone()).unwrap_or_default();
+        let floor = floor.effective();
+        let mut loosened = Vec::new();
+        let mut tools = BTreeMap::new();
+        for (tool, mode) in cfg.approval.effective() {
+            let mode = if mode == ApprovalMode::Auto && floor[tool] == ApprovalMode::Ask {
+                loosened.push(tool);
+                ApprovalMode::Ask
+            } else {
+                mode
+            };
+            tools.insert(tool.to_string(), mode);
+        }
+        if !loosened.is_empty() {
+            notices.push(format!(
+                "[approval] `auto` ignored for {}: a project .farhand.toml may make approval \
+                 stricter, not looser; set it in the global config",
+                loosened.join(", ")
+            ));
+            // Every tool spelled out, so `effective()` no longer depends
+            // on the mode.
+            cfg.approval.tools = tools;
+        }
+
+        // The global deny lists stay in force; a project can only add.
+        if let Some(b) = baseline {
+            for g in &b.guard.deny_globs {
+                if !cfg.guard.deny_globs.contains(g) {
+                    cfg.guard.deny_globs.push(g.clone());
+                }
+            }
+            for r in &b.guard.deny_content {
+                if !cfg.guard.deny_content.contains(r) {
+                    cfg.guard.deny_content.push(r.clone());
+                }
+            }
+        }
+        Ok((cfg, notices))
     }
 
     /// Parse a config that belongs to no directory: `allowed_dirs` entries
@@ -418,12 +531,23 @@ impl Config {
         }
         let mut dirs = Vec::with_capacity(self.local.allowed_dirs.len());
         let home = dirs::home_dir();
+        let home_canon = home.as_deref().and_then(|h| h.canonicalize().ok());
         for d in &self.local.allowed_dirs {
             let mut expanded = expand_home(d);
+            // `..` would let an entry reach above what it names: above the
+            // project folder for a relative entry, anywhere for `~/../x`.
+            if expanded
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(Error::Config(format!(
+                    "local.allowed_dirs entry `{}` may not contain `..`",
+                    d.display()
+                )));
+            }
             if !expanded.is_absolute() {
                 // A relative entry names the project folder itself or
-                // something inside it; `..` would let a config that arrived
-                // with a repository reach above its own directory.
+                // something inside it.
                 let Some(base) = base else {
                     return Err(Error::Config(format!(
                         "local.allowed_dirs entry `{}` is relative; only a project \
@@ -431,25 +555,22 @@ impl Config {
                         d.display()
                     )));
                 };
-                if expanded
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
-                    return Err(Error::Config(format!(
-                        "local.allowed_dirs entry `{}` may not contain `..`",
-                        d.display()
-                    )));
-                }
                 expanded = base.join(expanded);
             }
             // The allowlist is for a folder the user set aside, never the
-            // whole machine or home: that would hand every non-credential
-            // file to the model, and a project-level config could do it
-            // without the user noticing.
-            if expanded.parent().is_none() || home.as_deref() == Some(expanded.as_path()) {
+            // home directory or anything above it: that would hand every
+            // non-credential file to the model.
+            let canon = expanded.canonicalize().ok();
+            let covers_home = |h: &Path| {
+                h.starts_with(&expanded) || canon.as_deref().is_some_and(|c| h.starts_with(c))
+            };
+            if expanded.parent().is_none()
+                || home.as_deref().is_some_and(covers_home)
+                || home_canon.as_deref().is_some_and(covers_home)
+            {
                 return Err(Error::Config(format!(
-                    "local.allowed_dirs may not contain `/` or the home directory ({}); \
-                     allow a specific folder instead",
+                    "local.allowed_dirs may not contain `/`, the home directory or a folder \
+                     above it ({}); allow a specific folder instead",
                     d.display()
                 )));
             }
@@ -559,7 +680,9 @@ workdir = "~/project"
 # The only local directories the model may list, read from, upload from or
 # download into. Leave empty to close the local filesystem completely.
 # In a project .farhand.toml, "." means this folder: drop files here to
-# upload them, and downloads land here. Never allow your home directory.
+# upload them, and downloads land here. A project file may only name this
+# folder or folders inside it; absolute and `~` entries belong in the
+# global config. Never allow your home directory or anything above it.
 allowed_dirs = ["."]
 
 [limits]
@@ -571,6 +694,7 @@ allowed_dirs = ["."]
 # max_transfer_files = 5000
 
 [audit]
+# Global config only; a project file cannot move the log.
 # log_dir = "~/.local/share/farhand/audit"
 
 [guard]
@@ -584,6 +708,8 @@ allowed_dirs = ["."]
 #           remote_edit, upload and download; read-only tools run freely.
 # "auto":   nothing prompts; the audit log is your record.
 # "strict": every tool prompts, reads and searches included.
+# A project .farhand.toml can make this stricter than the global config,
+# never looser: `auto` there only holds where the global config allows it.
 mode = "ask"
 # Per-tool overrides (`ask` or `auto`), any tool name:
 # tools = { remote_write = "auto", remote_edit = "auto", remote_read = "ask" }
@@ -713,6 +839,7 @@ mod tests {
             .unwrap(),
             path: PathBuf::new(),
             source,
+            notices: Vec::new(),
         };
         assert!(mk("always", Source::Global).active());
         assert!(!mk("project", Source::Global).active());
@@ -724,6 +851,97 @@ mod tests {
                 .activation,
             ActivationMode::Project
         );
+    }
+
+    #[test]
+    fn allowed_dirs_refuse_home_ancestors_and_dotdot() {
+        let home = dirs::home_dir().unwrap();
+        let parent = home.parent().unwrap().display().to_string();
+        for d in [parent.as_str(), "~/..", "~/../x", "/tmp/../etc"] {
+            let err = Config::parse(&format!(
+                "[remote]\nhost='h'\nworkdir='/w'\n[local]\nallowed_dirs=['{d}']"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("allowed_dirs"), "{d}: {err}");
+        }
+    }
+
+    fn project(text: &str, baseline: Option<&str>) -> (Config, Vec<String>) {
+        let baseline = baseline.map(|b| Config::parse(b).unwrap());
+        Config::parse_project(text, Some(Path::new("/proj")), baseline.as_ref()).unwrap()
+    }
+
+    #[test]
+    fn project_file_cannot_loosen_approval() {
+        let (cfg, notes) = project(
+            "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'",
+            None,
+        );
+        let e = cfg.approval.effective();
+        assert_eq!(e["remote_shell"], ApprovalMode::Ask);
+        assert_eq!(e["upload"], ApprovalMode::Ask);
+        assert_eq!(e["remote_read"], ApprovalMode::Auto);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("remote_shell"), "{notes:?}");
+
+        // The global config sets the floor: what it allows, a project may use.
+        let global = "[remote]\nhost='g'\nworkdir='/'\n[approval]\nmode='auto'";
+        let (cfg, notes) = project(
+            "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'\ntools={ upload='ask' }",
+            Some(global),
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(cfg.approval.effective()["remote_shell"], ApprovalMode::Auto);
+        assert_eq!(cfg.approval.effective()["upload"], ApprovalMode::Ask);
+
+        // Tightening is always fine; loosening strict reads is not.
+        let strict = "[remote]\nhost='g'\nworkdir='/'\n[approval]\nmode='strict'";
+        let (cfg, notes) = project("[remote]\nhost='h'\nworkdir='/'", Some(strict));
+        assert_eq!(cfg.approval.effective()["remote_read"], ApprovalMode::Ask);
+        assert!(notes[0].contains("remote_read"), "{notes:?}");
+    }
+
+    #[test]
+    fn project_file_keeps_to_its_own_folder_and_the_global_log() {
+        let (cfg, notes) = project(
+            "[remote]\nhost='h'\nworkdir='/'\n[local]\nallowed_dirs=['.', '/Users', '~/x']\n\
+             [audit]\nlog_dir='/dev'",
+            Some("[remote]\nhost='g'\nworkdir='/'\n[audit]\nlog_dir='/var/log/fh'\n[guard]\ndeny_globs=['*.corp']"),
+        );
+        assert_eq!(cfg.local.allowed_dirs, vec![PathBuf::from("/proj")]);
+        assert_eq!(cfg.audit.log_dir, Some(PathBuf::from("/var/log/fh")));
+        assert_eq!(cfg.guard.deny_globs, vec!["*.corp".to_string()]);
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        let err = Config::parse_project(
+            "[remote]\nhost='h'\nworkdir='/'\n[local]\nallowed_dirs=['../x']",
+            Some(Path::new("/proj")),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
+    }
+
+    #[test]
+    fn a_farhand_toml_passed_by_path_is_still_a_project_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(".farhand.toml");
+        std::fs::write(
+            &p,
+            "[remote]\nhost='h'\nworkdir='/'\n[audit]\nlog_dir='/dev'",
+        )
+        .unwrap();
+        let l = Config::load_in(None, Some(&p)).unwrap();
+        assert_eq!(l.source, Source::Project);
+        assert!(
+            l.notices.iter().any(|n| n.contains("log_dir")),
+            "{:?}",
+            l.notices
+        );
+        let other = d.path().join("fh.toml");
+        std::fs::copy(&p, &other).unwrap();
+        let l = Config::load_in(None, Some(&other)).unwrap();
+        assert_eq!(l.source, Source::Explicit);
+        assert_eq!(l.config.audit.log_dir, Some(PathBuf::from("/dev")));
     }
 
     #[test]

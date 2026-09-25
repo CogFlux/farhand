@@ -300,12 +300,11 @@ impl FarHand {
         let started = Instant::now();
         let mut rec = Record::new("remote_shell");
         rec.command = Some(&a.command);
-        if let Err(e) = self
-            .inner()
-            .guard
-            .ensure_content("the command", a.command.as_bytes())
-        {
-            return Ok(self.deny(rec, started, e));
+        if let Err(e) = self.guard_args(&[
+            ("the command", Some(&a.command)),
+            ("the cwd", a.cwd.as_deref()),
+        ]) {
+            return Ok(self.refuse(rec, started, e));
         }
         match self
             .inner()
@@ -334,6 +333,9 @@ impl FarHand {
         let started = Instant::now();
         let mut rec = Record::new("remote_read");
         rec.path = Some(&a.path);
+        if let Err(e) = self.guard_args(&[("the path", Some(&a.path))]) {
+            return Ok(self.refuse(rec, started, e));
+        }
         let max = self.inner().remote.limits().max_read_bytes;
         match self.inner().remote.read_file(&a.path, max).await {
             Ok((bytes, len)) => {
@@ -357,12 +359,11 @@ impl FarHand {
         let mut rec = Record::new("remote_write");
         rec.path = Some(&a.path);
         rec.bytes = Some(a.content.len() as u64);
-        if let Err(e) = self
-            .inner()
-            .guard
-            .ensure_content("the file content", a.content.as_bytes())
-        {
-            return Ok(self.deny(rec, started, e));
+        if let Err(e) = self.guard_args(&[
+            ("the path", Some(&a.path)),
+            ("the file content", Some(&a.content)),
+        ]) {
+            return Ok(self.refuse(rec, started, e));
         }
         let _writing = self.inner().writes.lock().await;
         match self
@@ -390,12 +391,11 @@ impl FarHand {
         let started = Instant::now();
         let mut rec = Record::new("remote_edit");
         rec.path = Some(&a.path);
-        if let Err(e) = self
-            .inner()
-            .guard
-            .ensure_content("the replacement text", a.new_string.as_bytes())
-        {
-            return Ok(self.deny(rec, started, e));
+        if let Err(e) = self.guard_args(&[
+            ("the path", Some(&a.path)),
+            ("the replacement text", Some(&a.new_string)),
+        ]) {
+            return Ok(self.refuse(rec, started, e));
         }
         if a.old_string.is_empty() {
             return Ok(self.fail(rec, started, Error::Invalid("old_string is empty".into())));
@@ -457,6 +457,9 @@ impl FarHand {
         let mut rec = Record::new("remote_ls");
         let path = a.path.unwrap_or_default();
         rec.path = Some(&path);
+        if let Err(e) = self.guard_args(&[("the path", Some(&path))]) {
+            return Ok(self.refuse(rec, started, e));
+        }
         let target = if path.is_empty() { "." } else { path.as_str() };
         let platform = match self.inner().remote.platform().await {
             Ok(p) => p,
@@ -491,6 +494,13 @@ impl FarHand {
         let mut rec = Record::new("remote_glob");
         rec.command = Some(&a.pattern);
         let dir = a.path.unwrap_or_default();
+        rec.path = Some(&dir);
+        if let Err(e) = self.guard_args(&[
+            ("the glob pattern", Some(&a.pattern)),
+            ("the path", Some(&dir)),
+        ]) {
+            return Ok(self.refuse(rec, started, e));
+        }
         let (platform, has_rg) = match self.platform_and_rg().await {
             Ok(v) => v,
             Err(e) => return Ok(self.fail(rec, started, e)),
@@ -547,6 +557,14 @@ impl FarHand {
         let mut rec = Record::new("remote_grep");
         rec.command = Some(&a.pattern);
         let dir = a.path.unwrap_or_default();
+        rec.path = Some(&dir);
+        if let Err(e) = self.guard_args(&[
+            ("the search pattern", Some(&a.pattern)),
+            ("the path", Some(&dir)),
+            ("the include glob", a.include.as_deref()),
+        ]) {
+            return Ok(self.refuse(rec, started, e));
+        }
         let max = a.max_results.unwrap_or(DEFAULT_GREP_RESULTS).clamp(1, 5000);
         let (platform, has_rg) = match self.platform_and_rg().await {
             Ok(v) => v,
@@ -733,6 +751,9 @@ impl FarHand {
         let mut rec = Record::new("upload");
         rec.path = Some(&a.local_path);
         rec.target = Some(&a.remote_path);
+        if let Err(e) = self.guard_args(&[("the remote path", Some(&a.remote_path))]) {
+            return Ok(self.refuse(rec, started, e));
+        }
         let t = self.transfer();
         let excludes = a.exclude.unwrap_or_default();
         match t.upload(&a.local_path, &a.remote_path, &excludes).await {
@@ -757,6 +778,9 @@ impl FarHand {
         let mut rec = Record::new("download");
         rec.path = Some(&a.remote_path);
         rec.target = Some(&a.local_path);
+        if let Err(e) = self.guard_args(&[("the remote path", Some(&a.remote_path))]) {
+            return Ok(self.refuse(rec, started, e));
+        }
         let t = self.transfer();
         match t.download(&a.remote_path, &a.local_path).await {
             Ok(report) => {
@@ -832,6 +856,30 @@ impl FarHand {
     fn finish(&self, mut rec: Record<'_>, started: Instant) {
         rec.duration_ms = started.elapsed().as_millis();
         self.inner().audit.record(rec);
+    }
+
+    /// Refuse if any argument bound for the remote carries a secret. Not
+    /// only command text and file content: a path, a `cwd` or a search
+    /// pattern reaches the remote just as well.
+    fn guard_args(&self, args: &[(&str, Option<&str>)]) -> farhand_core::Result<()> {
+        for (what, value) in args {
+            if let Some(v) = value {
+                self.inner().guard.ensure_content(what, v.as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `deny` for a `guard_args` refusal: any logged argument may be the
+    /// material the guard caught, so none of them is kept.
+    fn refuse(&self, mut rec: Record<'_>, started: Instant, e: Error) -> CallToolResult {
+        const REDACTED: &str = "[redacted: refused by the secret guard]";
+        for field in [&mut rec.command, &mut rec.path, &mut rec.target] {
+            if field.is_some() {
+                *field = Some(REDACTED);
+            }
+        }
+        self.deny(rec, started, e)
     }
 
     fn deny(&self, mut rec: Record<'_>, started: Instant, e: Error) -> CallToolResult {
@@ -1045,6 +1093,64 @@ mod tests {
         // CRLF in the request is accepted too.
         let (out2, _, _) = apply_edit(file, "  x: 1\r\n  y: 2", "  q\r\n", false).unwrap();
         assert_eq!(out2, "a:\r\n  q\r\n\r\n");
+    }
+
+    #[tokio::test]
+    async fn secrets_in_any_argument_are_refused_and_not_logged() {
+        let d = tempfile::tempdir().unwrap();
+        let audit = d.path().join("audit");
+        let cfg = Config::parse(&format!(
+            "[remote]\nhost='nowhere.invalid'\nworkdir='/w'\n[audit]\nlog_dir='{}'",
+            audit.display()
+        ))
+        .unwrap();
+        let fh = FarHand::new(cfg, true).unwrap();
+        let key = "AKIAABCDEFGHIJKLMNOP";
+        let text = |r: CallToolResult| format!("{:?}", r.content);
+        // Every one is refused before any connection is attempted.
+        let r = fh
+            .remote_grep(Parameters(GrepArgs {
+                pattern: key.into(),
+                path: None,
+                include: None,
+                max_results: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(r).contains("aws-access-key"));
+        let r = fh
+            .remote_glob(Parameters(GlobArgs {
+                pattern: "*.rs".into(),
+                path: Some(format!("dir-{key}")),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let r = fh
+            .remote_shell(Parameters(BashArgs {
+                command: "ls".into(),
+                cwd: Some(format!("/tmp/{key}")),
+                timeout_secs: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let r = fh
+            .download(Parameters(DownloadArgs {
+                remote_path: format!("{key}.txt"),
+                local_path: "x".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let log = std::fs::read_dir(&audit)
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect::<String>();
+        assert_eq!(log.lines().count(), 4, "{log}");
+        assert!(!log.contains(key), "{log}");
+        assert!(log.lines().all(|l| l.contains("\"denied\"")), "{log}");
     }
 
     #[test]

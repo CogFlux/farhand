@@ -611,9 +611,15 @@ impl Remote {
 
     /// Copy the remote file at `path` (resolved here) to the local `dest`,
     /// using `DOWNLOAD_STREAMS` readers that each claim `DOWNLOAD_STEP`
-    /// ranges in turn. The data lands in a `.farhand-part` file next to
-    /// `dest` and is renamed into place once complete, so an interrupted
-    /// download leaves nothing that looks finished. Returns the byte count.
+    /// ranges in turn. The data lands in a temporary file next to `dest`
+    /// and is renamed into place once complete, so an interrupted download
+    /// leaves nothing that looks finished. Returns the byte count.
+    ///
+    /// The temporary file gets a random name and is created exclusively,
+    /// without following a symlink, and every reader writes through that one
+    /// handle: a link planted in the folder (by a cloned repository, say)
+    /// cannot redirect the data elsewhere. Before the rename, the folder
+    /// must still be the one the file was created in.
     pub async fn download_file(&self, path: &str, dest: &Path) -> Result<u64> {
         let conn = self.conn().await?;
         let path = self.resolve(path).await?;
@@ -629,62 +635,82 @@ impl Remote {
             return Err(Error::Invalid(format!("`{path}` is a directory")));
         }
         let len = meta.len().unwrap_or(0);
-        let part = {
-            let mut name = dest.file_name().unwrap_or_default().to_os_string();
-            name.push(".farhand-part");
-            dest.with_file_name(name)
+        let (Some(folder), Some(name)) = (dest.parent(), dest.file_name()) else {
+            return Err(Error::Invalid(format!(
+                "`{}` is not a file path",
+                dest.display()
+            )));
         };
-        {
-            let f = tokio::fs::File::create(&part).await?;
-            f.set_len(len).await?;
-        }
-        let next = AtomicU64::new(0);
-        let streams = DOWNLOAD_STREAMS.min(len.div_ceil(DOWNLOAD_STEP)).max(1);
-        let readers = (0..streams).map(|_| async {
-            let mut file = conn
-                .sftp
-                .open(&sftp_path)
-                .await
-                .map_err(|e| not_found(&path, e))?;
-            let mut out = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&part)
-                .await?;
-            loop {
-                let offset = next.fetch_add(DOWNLOAD_STEP, Ordering::Relaxed);
-                if offset >= len {
-                    break;
-                }
-                let want = DOWNLOAD_STEP.min(len - offset);
-                file.seek(std::io::SeekFrom::Start(offset)).await?;
-                let mut buf = BytesMut::with_capacity(want as usize);
-                while (buf.len() as u64) < want {
-                    // Short reads: see `read_file`.
-                    file.seek(std::io::SeekFrom::Start(offset + buf.len() as u64))
-                        .await?;
-                    let n = (want - buf.len() as u64).min(256 * 1024) as u32;
-                    match file.read(n, buf.split_off(buf.len())).await? {
-                        Some(bytes) => buf.unsplit(bytes),
-                        None => {
-                            return Err(Error::Ssh(format!(
-                                "`{path}` shrank while it was being downloaded"
-                            )))
+        let folder_before = folder.canonicalize()?;
+        let part = folder.join(format!(
+            ".{}.{:016x}.farhand-part",
+            name.to_string_lossy(),
+            random_u64()
+        ));
+        let out = Arc::new(create_exclusive(&part)?);
+        let done = async {
+            out.set_len(len)?;
+            let next = AtomicU64::new(0);
+            let streams = DOWNLOAD_STREAMS.min(len.div_ceil(DOWNLOAD_STEP)).max(1);
+            let readers = (0..streams).map(|_| async {
+                let mut file = conn
+                    .sftp
+                    .open(&sftp_path)
+                    .await
+                    .map_err(|e| not_found(&path, e))?;
+                loop {
+                    let offset = next.fetch_add(DOWNLOAD_STEP, Ordering::Relaxed);
+                    if offset >= len {
+                        break;
+                    }
+                    let want = DOWNLOAD_STEP.min(len - offset);
+                    let mut buf = BytesMut::with_capacity(want as usize);
+                    while (buf.len() as u64) < want {
+                        // Short reads: see `read_file`.
+                        file.seek(std::io::SeekFrom::Start(offset + buf.len() as u64))
+                            .await?;
+                        let n = (want - buf.len() as u64).min(256 * 1024) as u32;
+                        match file.read(n, buf.split_off(buf.len())).await? {
+                            Some(bytes) => buf.unsplit(bytes),
+                            None => {
+                                return Err(Error::Ssh(format!(
+                                    "`{path}` shrank while it was being downloaded"
+                                )))
+                            }
                         }
                     }
+                    let out = out.clone();
+                    tokio::task::spawn_blocking(move || write_all_at(&out, &buf, offset))
+                        .await
+                        .map_err(|e| Error::Ssh(format!("download writer failed: {e}")))??;
                 }
-                out.seek(std::io::SeekFrom::Start(offset)).await?;
-                out.write_all(&buf).await?;
+                let _ = file.close().await;
+                Ok::<(), Error>(())
+            });
+            futures_util::future::try_join_all(readers).await?;
+            out.sync_all()?;
+            if folder.canonicalize()? != folder_before {
+                return Err(Error::Denied(format!(
+                    "`{}` changed while downloading into it",
+                    folder.display()
+                )));
             }
-            out.flush().await?;
-            let _ = file.close().await;
+            if std::fs::symlink_metadata(dest).is_ok_and(|m| m.is_dir()) {
+                return Err(Error::Invalid(format!(
+                    "`{}` is a directory",
+                    dest.display()
+                )));
+            }
+            // `rename` replaces a symlink at `dest` rather than writing
+            // through it.
+            std::fs::rename(&part, dest)?;
             Ok::<(), Error>(())
-        });
-        let done = futures_util::future::try_join_all(readers).await;
+        }
+        .await;
         if let Err(e) = done {
-            let _ = tokio::fs::remove_file(&part).await;
+            let _ = std::fs::remove_file(&part);
             return Err(e);
         }
-        tokio::fs::rename(&part, dest).await?;
         Ok(len)
     }
 
@@ -1214,9 +1240,76 @@ async fn collect_bounded<R: AsyncReadExt + Unpin>(mut r: R, cap: usize) -> Resul
     })
 }
 
+/// A random value for temporary file names, from the standard library's
+/// per-process random hasher keys.
+fn random_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    h.finish()
+}
+
+/// Create `path` for writing; fail if anything, a symlink included, is
+/// already there.
+fn create_exclusive(path: &Path) -> Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW).mode(0o644);
+    }
+    o.open(path).map_err(|e| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot create {}: {e}", path.display()),
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn write_all_at(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn write_all_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        let n = std::os::windows::fs::FileExt::seek_write(file, buf, offset)?;
+        buf = &buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_files_never_follow_a_planted_link() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = d.path().join("outside");
+        let link = d.path().join("part");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        // Dangling: the target does not exist and must not be created.
+        assert!(create_exclusive(&link).is_err());
+        assert!(!outside.exists());
+        std::fs::write(&outside, "keep").unwrap();
+        assert!(create_exclusive(&link).is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        let fresh = d.path().join("fresh");
+        let f = create_exclusive(&fresh).unwrap();
+        write_all_at(&f, b"xy", 3).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"\0\0\0xy");
+        assert!(create_exclusive(&fresh).is_err());
+    }
 
     #[test]
     fn tilde_expansion() {

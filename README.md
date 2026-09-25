@@ -134,8 +134,9 @@ Approval is FarHand's knob, not the agent's: `[approval] mode = "ask"`
 `remote_edit`, `upload` and `download` and lets read-only tools run;
 `"auto"` prompts for nothing, with the audit log as the record; `"strict"`
 prompts for everything, reads included; `tools = { remote_write = "auto" }`
-overrides per tool. The plugin translates this into OpenCode's permission
-system at startup.
+overrides per tool. A project `.farhand.toml` can make this stricter but not
+looser than the global config; `auto` belongs in the global file. The
+plugin translates this into OpenCode's permission system at startup.
 
 Without the plugin, the same effect comes from `opencode.jsonc` (OpenCode 1
 format shown; OpenCode 2 reads it too, but cannot remove `browser_*` from
@@ -172,9 +173,10 @@ The tools then appear as `farhand_remote_shell`, `farhand_upload`, and so on.
 ## What never leaves this machine
 
 Every byte headed for the remote — command text, file content, edits,
-uploads — passes the secret guard first:
+uploads, and every other argument (paths, `cwd`, search patterns and
+globs) — passes the secret guard first:
 
-- **by path**: `.env*`, `*.pem`, `*.key`, `id_*`, `.netrc`, `.npmrc`,
+- **by path** (case-insensitively): `.env*`, `*.pem`, `*.key`, `id_*`, `.netrc`, `.npmrc`,
   `credentials*`, `*service-account*.json`, `*.tfstate`, agent configs
   (`opencode.json*`, `.mcp.json`, `claude_desktop_config.json`, ...), and
   anything under `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.config`,
@@ -203,19 +205,30 @@ stays on the remote. What holds regardless of which model is driving:
   `local_read` and `upload` resolve paths through the allowlist with
   symlinks followed first, so a link out of the folder is refused. Files the
   guard would refuse to upload are hidden from `local_ls` and refused by
-  `local_read`: what the model cannot see it cannot re-encode. `/` and the
-  home directory are not accepted as allowed folders.
+  `local_read`: what the model cannot see it cannot re-encode. `/`, the
+  home directory and any folder above it are not accepted as allowed
+  folders.
 - **Downloads cannot plant anything.** Every file a download would create is
-  resolved through the allowlist again (a symlink inside the folder cannot
-  redirect it) and checked by name: nothing credential-shaped, and nothing an
-  editor or agent executes or trusts on opening a folder (`.vscode`, `.idea`,
-  `.git`, `.husky`, `.envrc`, `.claude`, `.farhand.toml`, `CLAUDE.md`, ...).
-  A refused name aborts the whole download before the first byte is written.
+  resolved through the allowlist again and checked by name (case-insensitively):
+  nothing credential-shaped, and nothing an editor or agent executes or
+  trusts on opening a folder (`.vscode`, `.idea`, `.git`, `.husky`,
+  `.envrc`, `.claude`, `.farhand.toml`, `CLAUDE.md`, ...). A refused name
+  aborts the whole download before the first byte is written. The data goes
+  to a randomly named temporary file created exclusively and without
+  following symlinks, then is renamed into place, so a link planted in the
+  folder is replaced rather than written through.
 - **Only hosts you have already met.** SSH host keys are checked strictly:
   a `.farhand.toml` that arrives inside a cloned repository cannot point the
   agent at a machine you never connected to. Connect once by hand first.
+- **A project file can only tighten.** A `.farhand.toml` may arrive with a
+  cloned repository, so it cannot loosen `[approval]` below the global
+  config (or the default `ask`), allow local folders outside its own
+  directory, or move the audit log. Such settings are ignored, and
+  `farhand check` and `farhand validate` say which. Put them in the global
+  config instead.
 - **Everything is on record.** Every call, including refusals, is one line
-  in the audit log.
+  in the audit log. A log directory that cannot be written stops FarHand at
+  startup instead of losing records quietly.
 
 What FarHand does not do: it cannot stop a model that has legitimately read a
 non-secret file in the allowlist from sending it to the remote (that is the
