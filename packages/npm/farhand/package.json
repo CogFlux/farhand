@@ -1,6 +1,6 @@
 {
   "name": "farhand",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Remote hands for coding agents: run OpenCode / Claude Code / Codex work on a remote host over SSH, keep credentials local, audit everything",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/CogFlux/farhand.git" },
