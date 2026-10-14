@@ -38,6 +38,8 @@ pub struct Audit {
     session: String,
     host: String,
     file: Mutex<Option<(String, File)>>,
+    /// Why a record could not be written, once one could not.
+    failure: Mutex<Option<String>>,
 }
 
 impl Audit {
@@ -68,6 +70,7 @@ impl Audit {
             session,
             host: host.to_string(),
             file: Mutex::new(Some((day, file))),
+            failure: Mutex::new(None),
         })
     }
 
@@ -79,41 +82,51 @@ impl Audit {
         &self.dir
     }
 
-    /// Append one record. A failure to write the log is reported on stderr
-    /// and otherwise ignored: losing an audit line must not block work,
-    /// but it must not be silent either.
+    /// Why the log stopped being written, if it has. A session that has
+    /// lost a record refuses every later call (see the server): the log is
+    /// the record of what the model did, and it does not go on unrecorded.
+    pub fn failure(&self) -> Option<String> {
+        lock(&self.failure).clone()
+    }
+
+    /// Append one record. A failure to write it is reported on stderr and
+    /// remembered in [`failure`](Self::failure).
     pub fn record<'a>(&'a self, mut rec: Record<'a>) {
+        if let Err(e) = self.write(&mut rec) {
+            eprintln!("farhand: {e}; refusing every further call");
+            lock(&self.failure).get_or_insert(e);
+        }
+    }
+
+    fn write<'a>(&'a self, rec: &mut Record<'a>) -> std::result::Result<(), String> {
         rec.ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         rec.session = &self.session;
         rec.host = &self.host;
-        let line = match serde_json::to_string(&rec) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("farhand: audit serialise failed: {e}");
-                return;
-            }
-        };
+        let line =
+            serde_json::to_string(&rec).map_err(|e| format!("audit serialise failed: {e}"))?;
         let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let mut guard = match self.file.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
+        let mut guard = lock(&self.file);
         let needs_open = !matches!(&*guard, Some((d, _)) if *d == day);
         if needs_open {
             let path = self.dir.join(format!("{day}.jsonl"));
-            match OpenOptions::new().create(true).append(true).open(&path) {
-                Ok(f) => *guard = Some((day, f)),
-                Err(e) => {
-                    eprintln!("farhand: cannot open audit log {}: {e}", path.display());
-                    return;
-                }
-            }
+            let f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("cannot open audit log {}: {e}", path.display()))?;
+            *guard = Some((day, f));
         }
-        if let Some((_, f)) = &mut *guard {
-            if let Err(e) = writeln!(f, "{line}") {
-                eprintln!("farhand: audit write failed: {e}");
-            }
-        }
+        let Some((_, f)) = &mut *guard else {
+            unreachable!("opened above")
+        };
+        writeln!(f, "{line}").map_err(|e| format!("audit write failed: {e}"))
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
     }
 }
 
@@ -163,6 +176,21 @@ mod tests {
         assert_eq!(v["host"], "devbox");
         assert_eq!(v["command"], "ls");
         assert!(v["path"].is_null());
+    }
+
+    #[test]
+    fn a_lost_record_is_remembered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("audit");
+        let audit = Audit::open(dir.clone(), "devbox").unwrap();
+        audit.record(Record::new("remote_info"));
+        assert!(audit.failure().is_none());
+        // The day's file can no longer be opened.
+        *lock(&audit.file) = None;
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, "").unwrap();
+        audit.record(Record::new("remote_info"));
+        assert!(audit.failure().unwrap().contains("cannot open"));
     }
 
     #[test]

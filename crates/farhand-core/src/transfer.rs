@@ -2,6 +2,7 @@
 //! Uploads go through the secret guard file by file; downloads only ever
 //! land inside the allowlist.
 
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -119,15 +120,23 @@ impl Transfer<'_> {
         // The guard runs over the whole plan before the first byte moves, so a
         // refused file never leaves a half-uploaded tree behind.
         for (path, _) in &plan {
-            self.guard.ensure_upload_file(path)?;
+            let mut file = self.local.open_resolved(path)?;
+            self.guard.ensure_upload_reader(path, &mut file)?;
         }
 
         // `upload_file` creates parents as it goes; the remote remembers
         // which directories it has seen, so a deep tree costs one check per
-        // directory, not per file.
+        // directory, not per file. Each file is opened again and scanned
+        // again as it is sent: the scan above is for the all-or-nothing
+        // answer, this one is what makes it hold for the bytes that leave.
         self.remote.ensure_dir(&remote_base).await?;
         for (path, dest) in &plan {
-            let (_, bytes) = self.remote.upload_file(path, dest).await?;
+            let file = self.local.open_resolved(path)?;
+            let left = self.limits.max_transfer_bytes.saturating_sub(report.bytes);
+            let (_, bytes) = self
+                .remote
+                .upload_file(file, dest, self.guard.stream(path), left)
+                .await?;
             report.files += 1;
             report.bytes += bytes;
         }
@@ -141,12 +150,18 @@ impl Transfer<'_> {
         dest: &str,
         report: &mut TransferReport,
     ) -> Result<u64> {
-        let meta = std::fs::metadata(local)?;
-        if meta.len() > self.limits.max_transfer_bytes {
-            return Err(self.too_large(&format!("`{}` ({} bytes)", local.display(), meta.len())));
+        let mut file = self.local.open_resolved(local)?;
+        let len = file.metadata()?.len();
+        let max = self.limits.max_transfer_bytes;
+        if len > max {
+            return Err(self.too_large(&format!("`{}` ({len} bytes)", local.display())));
         }
-        self.guard.ensure_upload_file(local)?;
-        let (_, bytes) = self.remote.upload_file(local, dest).await?;
+        self.guard.ensure_upload_reader(local, &mut file)?;
+        file.rewind()?;
+        let (_, bytes) = self
+            .remote
+            .upload_file(file, dest, self.guard.stream(local), max)
+            .await?;
         report.files += 1;
         Ok(bytes)
     }
@@ -192,10 +207,7 @@ impl Transfer<'_> {
                 if len > max {
                     return Err(self.too_large(&format!("`{remote_path}` ({len} bytes)")));
                 }
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let bytes = self.remote.download_file(&remote_path, &dest).await?;
+                let bytes = self.fetch(&remote_path, &dest, max).await?;
                 report.files = 1;
                 report.bytes = bytes;
                 report.destination = dest.display().to_string();
@@ -239,10 +251,7 @@ impl Transfer<'_> {
                             report.bytes + len
                         )));
                     }
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    let bytes = self.remote.download_file(&f, &dest).await?;
+                    let bytes = self.fetch(&f, &dest, max - report.bytes).await?;
                     report.files += 1;
                     report.bytes += bytes;
                 }
@@ -254,6 +263,20 @@ impl Transfer<'_> {
 }
 
 impl Transfer<'_> {
+    /// Download one remote file to `dest`, at most `max` bytes. The data
+    /// goes to a temporary file in the destination folder, reached without
+    /// following a symlink, and is renamed into place once complete, so an
+    /// interrupted download leaves nothing that looks finished.
+    async fn fetch(&self, remote_path: &str, dest: &Path, max: u64) -> Result<u64> {
+        let part = self.local.create_part(dest)?;
+        let bytes = self
+            .remote
+            .download_into(remote_path, part.file(), max)
+            .await?;
+        part.commit()?;
+        Ok(bytes)
+    }
+
     /// Re-check a download destination: it must still resolve inside the
     /// allowlist (a symlink under the root could point elsewhere) and its
     /// path relative to that root must pass the guard.

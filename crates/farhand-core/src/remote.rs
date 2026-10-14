@@ -35,6 +35,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::{default_shell, Limits, Os, RemoteConfig};
 use crate::error::{Error, Result};
+use crate::guard::StreamGuard;
 use crate::text::shell_quote;
 
 /// Remote `timeout(1)` exit status; the Windows wrapper uses the same.
@@ -247,11 +248,20 @@ impl Remote {
         // already connected to by hand. A `.farhand.toml` that arrives with a
         // cloned repository therefore cannot point an agent at a machine the
         // user never chose.
+        //
+        // The user's ssh config is read through a wrapper that turns off
+        // every channel back to this machine first: a `RemoteForward`,
+        // `ForwardAgent` or `ForwardX11` meant for interactive use would
+        // otherwise hand the remote a local service, the local agent's keys
+        // or the local display. ssh keeps the first value it reads, so the
+        // user's own settings cannot turn them back on.
+        let wrapper = SshConfigWrapper::create(&[USER_SSH_CONFIG, SYSTEM_SSH_CONFIG])?;
         let mut builder = SessionBuilder::default();
         builder
             .connect_timeout(Duration::from_secs(self.cfg.connect_timeout_secs))
             .server_alive_interval(Duration::from_secs(self.cfg.server_alive_interval_secs))
-            .known_hosts_check(KnownHosts::Strict);
+            .known_hosts_check(KnownHosts::Strict)
+            .config_file(&wrapper.path);
         let session = builder.connect_mux(&self.cfg.host).await.map_err(|e| {
             Error::Ssh(format!(
                 "cannot connect to `{}`: {e}. Check that `ssh {}` works from a terminal; \
@@ -260,6 +270,9 @@ impl Remote {
                 self.cfg.host, self.cfg.host
             ))
         })?;
+        // The master has read its config (and started any jump host) by
+        // the time `connect_mux` returns.
+        drop(wrapper);
         let session = Arc::new(session);
         let sftp_options = SftpOptions::new().tokio_compat_file_write_limit(
             NonZeroUsize::new(UPLOAD_WINDOW).expect("non-zero window"),
@@ -548,11 +561,19 @@ impl Remote {
         Ok(path)
     }
 
-    /// Copy the local file at `local` to `dest` (resolved here, parents
+    /// Copy the open local file `src` to `dest` (resolved here, parents
     /// created), streaming it in `TRANSFER_CHUNK` pieces with up to
-    /// `UPLOAD_WINDOW` bytes unacknowledged. Returns the native remote path
-    /// and the byte count. A failed upload removes what it left behind.
-    pub async fn upload_file(&self, local: &Path, dest: &str) -> Result<(String, u64)> {
+    /// `UPLOAD_WINDOW` bytes unacknowledged. Every piece passes `scan`
+    /// before it is written, so what arrives is exactly what the guard saw,
+    /// and no more than `max` bytes are sent. Returns the native remote
+    /// path and the byte count. A failed upload removes what it left behind.
+    pub async fn upload_file(
+        &self,
+        src: std::fs::File,
+        dest: &str,
+        mut scan: StreamGuard<'_>,
+        max: u64,
+    ) -> Result<(String, u64)> {
         let conn = self.conn().await?;
         let path = self.resolve(dest).await?;
         if let Some(parent) = parent_of(conn.platform, &path) {
@@ -560,7 +581,7 @@ impl Remote {
         }
         let sftp_path = to_sftp_path(conn.platform, &path);
         let _permit = self.channels.acquire().await.expect("semaphore open");
-        let mut src = tokio::fs::File::open(local).await?;
+        let mut src = tokio::fs::File::from_std(src);
         let file = conn
             .sftp
             .create(&sftp_path)
@@ -573,21 +594,36 @@ impl Remote {
             // every write is acknowledged; dropping it at the end of this
             // block closes the handle in the background.
             let mut file = std::pin::pin!(TokioCompatFile::new(file));
+            let mut read: u64 = 0;
             loop {
                 let n = src.read(&mut buf).await?;
                 if n == 0 {
                     break;
                 }
-                file.write_all(&buf[..n]).await?;
-                sent += n as u64;
+                read += n as u64;
+                if read > max {
+                    return Err(Error::Invalid(format!(
+                        "`{path}`: the local file grew past the {max} bytes the transfer \
+                         limit leaves while it was being uploaded"
+                    )));
+                }
+                let out = scan.feed(&buf[..n])?;
+                file.write_all(&out).await?;
+                sent += out.len() as u64;
             }
+            let out = scan.finish();
+            file.write_all(&out).await?;
+            sent += out.len() as u64;
             file.flush().await?;
             Ok(())
         }
         .await;
         if let Err(e) = copied {
             let _ = conn.sftp.fs().remove_file(&sftp_path).await;
-            return Err(Error::Ssh(format!("upload of `{path}` failed: {e}")));
+            return Err(match e {
+                Error::Denied(_) | Error::Invalid(_) => e,
+                e => Error::Ssh(format!("upload of `{path}` failed: {e}")),
+            });
         }
         Ok((path, sent))
     }
@@ -609,18 +645,17 @@ impl Remote {
         Ok(meta.len().unwrap_or(0))
     }
 
-    /// Copy the remote file at `path` (resolved here) to the local `dest`,
-    /// using `DOWNLOAD_STREAMS` readers that each claim `DOWNLOAD_STEP`
-    /// ranges in turn. The data lands in a temporary file next to `dest`
-    /// and is renamed into place once complete, so an interrupted download
-    /// leaves nothing that looks finished. Returns the byte count.
-    ///
-    /// The temporary file gets a random name and is created exclusively,
-    /// without following a symlink, and every reader writes through that one
-    /// handle: a link planted in the folder (by a cloned repository, say)
-    /// cannot redirect the data elsewhere. Before the rename, the folder
-    /// must still be the one the file was created in.
-    pub async fn download_file(&self, path: &str, dest: &Path) -> Result<u64> {
+    /// Copy the remote file at `path` (resolved here) into `out`, using
+    /// `DOWNLOAD_STREAMS` readers that each claim `DOWNLOAD_STEP` ranges in
+    /// turn and write through the one handle. The size is taken once, here,
+    /// and nothing past it is read: a file over `max` bytes by now is
+    /// refused before anything is allocated. Returns the byte count.
+    pub async fn download_into(
+        &self,
+        path: &str,
+        out: &Arc<std::fs::File>,
+        max: u64,
+    ) -> Result<u64> {
         let conn = self.conn().await?;
         let path = self.resolve(path).await?;
         let sftp_path = to_sftp_path(conn.platform, &path);
@@ -635,82 +670,51 @@ impl Remote {
             return Err(Error::Invalid(format!("`{path}` is a directory")));
         }
         let len = meta.len().unwrap_or(0);
-        let (Some(folder), Some(name)) = (dest.parent(), dest.file_name()) else {
+        if len > max {
             return Err(Error::Invalid(format!(
-                "`{}` is not a file path",
-                dest.display()
+                "`{path}` is now {len} bytes, more than the {max} bytes the transfer limit \
+                 leaves; it changed while being downloaded"
             )));
-        };
-        let folder_before = folder.canonicalize()?;
-        let part = folder.join(format!(
-            ".{}.{:016x}.farhand-part",
-            name.to_string_lossy(),
-            random_u64()
-        ));
-        let out = Arc::new(create_exclusive(&part)?);
-        let done = async {
-            out.set_len(len)?;
-            let next = AtomicU64::new(0);
-            let streams = DOWNLOAD_STREAMS.min(len.div_ceil(DOWNLOAD_STEP)).max(1);
-            let readers = (0..streams).map(|_| async {
-                let mut file = conn
-                    .sftp
-                    .open(&sftp_path)
-                    .await
-                    .map_err(|e| not_found(&path, e))?;
-                loop {
-                    let offset = next.fetch_add(DOWNLOAD_STEP, Ordering::Relaxed);
-                    if offset >= len {
-                        break;
-                    }
-                    let want = DOWNLOAD_STEP.min(len - offset);
-                    let mut buf = BytesMut::with_capacity(want as usize);
-                    while (buf.len() as u64) < want {
-                        // Short reads: see `read_file`.
-                        file.seek(std::io::SeekFrom::Start(offset + buf.len() as u64))
-                            .await?;
-                        let n = (want - buf.len() as u64).min(256 * 1024) as u32;
-                        match file.read(n, buf.split_off(buf.len())).await? {
-                            Some(bytes) => buf.unsplit(bytes),
-                            None => {
-                                return Err(Error::Ssh(format!(
-                                    "`{path}` shrank while it was being downloaded"
-                                )))
-                            }
+        }
+        out.set_len(len)?;
+        let next = AtomicU64::new(0);
+        let streams = DOWNLOAD_STREAMS.min(len.div_ceil(DOWNLOAD_STEP)).max(1);
+        let readers = (0..streams).map(|_| async {
+            let mut file = conn
+                .sftp
+                .open(&sftp_path)
+                .await
+                .map_err(|e| not_found(&path, e))?;
+            loop {
+                let offset = next.fetch_add(DOWNLOAD_STEP, Ordering::Relaxed);
+                if offset >= len {
+                    break;
+                }
+                let want = DOWNLOAD_STEP.min(len - offset);
+                let mut buf = BytesMut::with_capacity(want as usize);
+                while (buf.len() as u64) < want {
+                    // Short reads: see `read_file`.
+                    file.seek(std::io::SeekFrom::Start(offset + buf.len() as u64))
+                        .await?;
+                    let n = (want - buf.len() as u64).min(256 * 1024) as u32;
+                    match file.read(n, buf.split_off(buf.len())).await? {
+                        Some(bytes) => buf.unsplit(bytes),
+                        None => {
+                            return Err(Error::Ssh(format!(
+                                "`{path}` shrank while it was being downloaded"
+                            )))
                         }
                     }
-                    let out = out.clone();
-                    tokio::task::spawn_blocking(move || write_all_at(&out, &buf, offset))
-                        .await
-                        .map_err(|e| Error::Ssh(format!("download writer failed: {e}")))??;
                 }
-                let _ = file.close().await;
-                Ok::<(), Error>(())
-            });
-            futures_util::future::try_join_all(readers).await?;
-            out.sync_all()?;
-            if folder.canonicalize()? != folder_before {
-                return Err(Error::Denied(format!(
-                    "`{}` changed while downloading into it",
-                    folder.display()
-                )));
+                let out = out.clone();
+                tokio::task::spawn_blocking(move || write_all_at(&out, &buf, offset))
+                    .await
+                    .map_err(|e| Error::Ssh(format!("download writer failed: {e}")))??;
             }
-            if std::fs::symlink_metadata(dest).is_ok_and(|m| m.is_dir()) {
-                return Err(Error::Invalid(format!(
-                    "`{}` is a directory",
-                    dest.display()
-                )));
-            }
-            // `rename` replaces a symlink at `dest` rather than writing
-            // through it.
-            std::fs::rename(&part, dest)?;
+            let _ = file.close().await;
             Ok::<(), Error>(())
-        }
-        .await;
-        if let Err(e) = done {
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
-        }
+        });
+        futures_util::future::try_join_all(readers).await?;
         Ok(len)
     }
 
@@ -1240,9 +1244,60 @@ async fn collect_bounded<R: AsyncReadExt + Unpin>(mut r: R, cap: usize) -> Resul
     })
 }
 
+/// Where ssh reads its configuration when not given `-F`, in its order.
+const USER_SSH_CONFIG: &str = "~/.ssh/config";
+const SYSTEM_SSH_CONFIG: &str = "/etc/ssh/ssh_config";
+
+/// What precedes the user's own ssh config: nothing on the connection may
+/// lead back to this machine. Port forwardings are cleared whichever file
+/// set them; the rest win by coming first.
+const SSH_CONFIG_HEADER: &str = "\
+# Written by FarHand for one connection and removed once it is up.
+ClearAllForwardings yes
+ForwardAgent no
+ForwardX11 no
+ForwardX11Trusted no
+Tunnel no
+GSSAPIDelegateCredentials no
+";
+
+fn ssh_config_text(includes: &[&str]) -> String {
+    let mut s = SSH_CONFIG_HEADER.to_string();
+    for i in includes {
+        s.push_str(&format!("Include {i}\n"));
+    }
+    s
+}
+
+/// The `-F` file for one connection: created exclusively and readable by
+/// the user only, removed when dropped.
+struct SshConfigWrapper {
+    path: std::path::PathBuf,
+}
+
+impl SshConfigWrapper {
+    fn create(includes: &[&str]) -> Result<Self> {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "farhand-ssh-{}-{:016x}.conf",
+            std::process::id(),
+            random_u64()
+        ));
+        let mut f = create_exclusive(&path)?;
+        f.write_all(ssh_config_text(includes).as_bytes())?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for SshConfigWrapper {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// A random value for temporary file names, from the standard library's
 /// per-process random hasher keys.
-fn random_u64() -> u64 {
+pub(crate) fn random_u64() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u128(
@@ -1254,15 +1309,15 @@ fn random_u64() -> u64 {
     h.finish()
 }
 
-/// Create `path` for writing; fail if anything, a symlink included, is
-/// already there.
+/// Create `path` for writing, readable by the user only; fail if anything,
+/// a symlink included, is already there.
 fn create_exclusive(path: &Path) -> Result<std::fs::File> {
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(libc::O_NOFOLLOW).mode(0o644);
+        o.custom_flags(libc::O_NOFOLLOW).mode(0o600);
     }
     o.open(path).map_err(|e| {
         Error::Io(std::io::Error::new(
@@ -1309,6 +1364,48 @@ mod tests {
         write_all_at(&f, b"xy", 3).unwrap();
         assert_eq!(std::fs::read(&fresh).unwrap(), b"\0\0\0xy");
         assert!(create_exclusive(&fresh).is_err());
+    }
+
+    #[test]
+    fn the_ssh_config_wrapper_closes_every_way_back() {
+        let d = tempfile::tempdir().unwrap();
+        let user = d.path().join("config");
+        std::fs::write(
+            &user,
+            "Host fhtest\n  HostName 192.0.2.1\n  RemoteForward 9000 localhost:22\n  \
+             LocalForward 9001 localhost:22\n  DynamicForward 9002\n  ForwardAgent yes\n  \
+             ForwardX11 yes\n",
+        )
+        .unwrap();
+        let w = SshConfigWrapper::create(&[user.to_str().unwrap()]).unwrap();
+        let path = w.path.clone();
+        // `ssh -G` only prints the resolved config; it connects to nothing.
+        let out = std::process::Command::new("ssh")
+            .arg("-G")
+            .arg("-F")
+            .arg(&path)
+            .arg("fhtest")
+            .stdin(std::process::Stdio::null())
+            .output();
+        drop(w);
+        assert!(!path.exists());
+        let Ok(out) = out else {
+            return; // no ssh on this machine
+        };
+        let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        // The user's own settings still apply ...
+        assert!(text.lines().any(|l| l == "hostname 192.0.2.1"), "{text}");
+        // ... except those leading back to this machine.
+        for line in [
+            "clearallforwardings yes",
+            "forwardagent no",
+            "forwardx11 no",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line}: {text}");
+        }
+        for word in ["remoteforward", "localforward", "dynamicforward"] {
+            assert!(!text.contains(word), "{word}: {text}");
+        }
     }
 
     #[test]

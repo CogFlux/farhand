@@ -347,21 +347,21 @@ impl Config {
         let (config, notices) = if source == Source::Project {
             let global = Self::global_path();
             let mut notices = Vec::new();
-            let baseline = if global.is_file() {
-                match std::fs::read_to_string(&global)
+            // The global config is the floor a project file is measured
+            // against and the source of the user's own deny lists. One that
+            // exists but does not load stops FarHand: falling back to the
+            // defaults would quietly drop both.
+            let baseline = if global.symlink_metadata().is_ok() {
+                let c = std::fs::read_to_string(&global)
                     .map_err(Error::from)
                     .and_then(|t| Self::parse(&t))
-                {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        notices.push(format!(
-                            "the global config {} does not load ({e}); the project file is \
-                             measured against the defaults instead",
+                    .map_err(|e| {
+                        Error::Config(format!(
+                            "the global config {} does not load ({e}); fix or remove it",
                             global.display()
-                        ));
-                        None
-                    }
-                }
+                        ))
+                    })?;
+                Some(c)
             } else {
                 None
             };
@@ -409,6 +409,36 @@ impl Config {
             ));
         }
         cfg.validate(base)?;
+        // A relative entry is only inside the project as written. A cloned
+        // repository can carry `assets -> ~/Documents` next to its
+        // `.farhand.toml`, so each entry must still be inside the project
+        // folder once symlinks are resolved, and it is kept in that resolved
+        // form so a link swapped in later changes nothing.
+        let project = base
+            .map(|b| {
+                if b.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    b
+                }
+            })
+            .and_then(|b| b.canonicalize().ok());
+        for d in std::mem::take(&mut cfg.local.allowed_dirs) {
+            match (d.canonicalize(), &project) {
+                (Ok(c), Some(p)) if c.starts_with(p) && c.is_dir() => {
+                    cfg.local.allowed_dirs.push(c)
+                }
+                (Ok(_), _) => notices.push(format!(
+                    "local.allowed_dirs entry `{}` ignored: it is not a folder inside the \
+                     project directory once symlinks are resolved",
+                    d.display()
+                )),
+                (Err(e), _) => notices.push(format!(
+                    "local.allowed_dirs entry `{}` ignored: {e}",
+                    d.display()
+                )),
+            }
+        }
         cfg.audit.log_dir = baseline.and_then(|b| b.audit.log_dir.clone());
 
         let floor = baseline.map(|b| b.approval.clone()).unwrap_or_default();
@@ -866,14 +896,17 @@ mod tests {
         }
     }
 
-    fn project(text: &str, baseline: Option<&str>) -> (Config, Vec<String>) {
+    /// Parse `text` as the `.farhand.toml` of a fresh project folder.
+    fn project(text: &str, baseline: Option<&str>) -> (Config, Vec<String>, tempfile::TempDir) {
+        let d = tempfile::tempdir().unwrap();
         let baseline = baseline.map(|b| Config::parse(b).unwrap());
-        Config::parse_project(text, Some(Path::new("/proj")), baseline.as_ref()).unwrap()
+        let (cfg, notes) = Config::parse_project(text, Some(d.path()), baseline.as_ref()).unwrap();
+        (cfg, notes, d)
     }
 
     #[test]
     fn project_file_cannot_loosen_approval() {
-        let (cfg, notes) = project(
+        let (cfg, notes, _d) = project(
             "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'",
             None,
         );
@@ -886,7 +919,7 @@ mod tests {
 
         // The global config sets the floor: what it allows, a project may use.
         let global = "[remote]\nhost='g'\nworkdir='/'\n[approval]\nmode='auto'";
-        let (cfg, notes) = project(
+        let (cfg, notes, _d) = project(
             "[remote]\nhost='h'\nworkdir='/'\n[approval]\nmode='auto'\ntools={ upload='ask' }",
             Some(global),
         );
@@ -896,19 +929,22 @@ mod tests {
 
         // Tightening is always fine; loosening strict reads is not.
         let strict = "[remote]\nhost='g'\nworkdir='/'\n[approval]\nmode='strict'";
-        let (cfg, notes) = project("[remote]\nhost='h'\nworkdir='/'", Some(strict));
+        let (cfg, notes, _d) = project("[remote]\nhost='h'\nworkdir='/'", Some(strict));
         assert_eq!(cfg.approval.effective()["remote_read"], ApprovalMode::Ask);
         assert!(notes[0].contains("remote_read"), "{notes:?}");
     }
 
     #[test]
     fn project_file_keeps_to_its_own_folder_and_the_global_log() {
-        let (cfg, notes) = project(
+        let (cfg, notes, d) = project(
             "[remote]\nhost='h'\nworkdir='/'\n[local]\nallowed_dirs=['.', '/Users', '~/x']\n\
              [audit]\nlog_dir='/dev'",
             Some("[remote]\nhost='g'\nworkdir='/'\n[audit]\nlog_dir='/var/log/fh'\n[guard]\ndeny_globs=['*.corp']"),
         );
-        assert_eq!(cfg.local.allowed_dirs, vec![PathBuf::from("/proj")]);
+        assert_eq!(
+            cfg.local.allowed_dirs,
+            vec![d.path().canonicalize().unwrap()]
+        );
         assert_eq!(cfg.audit.log_dir, Some(PathBuf::from("/var/log/fh")));
         assert_eq!(cfg.guard.deny_globs, vec!["*.corp".to_string()]);
         assert_eq!(notes.len(), 3, "{notes:?}");
@@ -919,6 +955,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains(".."), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_folders_may_not_leave_the_project_through_a_symlink() {
+        let d = tempfile::tempdir().unwrap();
+        let proj = d.path().join("proj");
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(proj.join("real/sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, proj.join("assets")).unwrap();
+        std::os::unix::fs::symlink(proj.join("real/sub"), proj.join("inner")).unwrap();
+        let (cfg, notes) = Config::parse_project(
+            "[remote]\nhost='h'\nworkdir='/'\n[local]\nallowed_dirs=['assets', 'inner', 'missing', 'real']",
+            Some(&proj),
+            None,
+        )
+        .unwrap();
+        let real = proj.join("real").canonicalize().unwrap();
+        assert_eq!(cfg.local.allowed_dirs, vec![real.join("sub"), real]);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("/assets`"), "{notes:?}");
+        assert!(notes[1].contains("/missing`"), "{notes:?}");
     }
 
     #[test]

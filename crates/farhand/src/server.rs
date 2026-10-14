@@ -719,12 +719,12 @@ impl FarHand {
         let started = Instant::now();
         let mut rec = Record::new("local_read");
         rec.path = Some(&a.path);
-        let file = match self.inner().local.resolve_existing(&a.path) {
+        let (file, handle) = match self.inner().local.open_file(&a.path) {
             Ok(f) => f,
             Err(e) => return Ok(self.fail(rec, started, local_hint(e))),
         };
         let max = self.inner().remote.limits().max_read_bytes;
-        let (bytes, len) = match read_local_capped(&file, max) {
+        let (bytes, len) = match read_local_capped(handle, max) {
             Ok(r) => r,
             Err(e) => return Ok(self.fail(rec, started, e)),
         };
@@ -797,6 +797,7 @@ impl FarHand {
         description = "Show which remote host and workdir FarHand is bound to, the connection state, and the allowlisted local directories."
     )]
     async fn remote_info(&self) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
         let c = &self.inner().config;
         let connected = self.inner().remote.is_connected().await;
         let workdir = match self.inner().remote.effective_workdir().await {
@@ -823,6 +824,7 @@ impl FarHand {
             Ok(Platform::Posix) => ("posix".to_string(), c.remote.shell.join(" ")),
             Err(e) => (format!("unknown ({e})"), c.remote.shell.join(" ")),
         };
+        self.finish(Record::new("remote_info"), started);
         Ok(ok(format!(
             "host: {}\nreachable from the user's machine as: {} (ssh port {})\nworkdir: {}\n\
              os: {}\nconnected: {}\nshell: {}\ncommand timeout: {}s (max {}s)\n\
@@ -913,6 +915,24 @@ impl FarHand {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for FarHand {
+    /// Every call goes through the router, unless the audit log has lost a
+    /// record: then nothing more runs until FarHand is restarted.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        if let Some(e) = self.inner.as_ref().and_then(|i| i.audit.failure()) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "FarHand has stopped: the audit log could not be written ({e}). Every call is \
+                 refused until the agent is restarted; tell the user."
+            ))])
+            .into());
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
@@ -1048,16 +1068,9 @@ fn read_result(
     ok(s)
 }
 
-fn read_local_capped(path: &std::path::Path, max: usize) -> farhand_core::Result<(Vec<u8>, u64)> {
+fn read_local_capped(mut f: std::fs::File, max: usize) -> farhand_core::Result<(Vec<u8>, u64)> {
     use std::io::Read;
-    let meta = std::fs::metadata(path)?;
-    if meta.is_dir() {
-        return Err(Error::Invalid(format!(
-            "`{}` is a directory",
-            path.display()
-        )));
-    }
-    let mut f = std::fs::File::open(path)?;
+    let meta = f.metadata()?;
     let mut buf = Vec::with_capacity((meta.len() as usize).min(max));
     f.by_ref().take(max as u64).read_to_end(&mut buf)?;
     Ok((buf, meta.len()))

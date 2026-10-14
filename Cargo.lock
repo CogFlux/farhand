@@ -265,6 +265,7 @@ dependencies = [
  "openssh",
  "openssh-sftp-client",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

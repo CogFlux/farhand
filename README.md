@@ -203,40 +203,61 @@ stays on the remote. What holds regardless of which model is driving:
   model-supplied string reaches a local command line.
 - **Local reads are the allowlist, minus credentials.** `local_ls`,
   `local_read` and `upload` resolve paths through the allowlist with
-  symlinks followed first, so a link out of the folder is refused. Files the
+  symlinks followed first, so a link out of the folder is refused. The file
+  is then opened from a handle on its allowed folder one component at a
+  time without following a symlink, so a link swapped in after the check
+  (by a sync tool, an editor, another process) is refused too. Files the
   guard would refuse to upload are hidden from `local_ls` and refused by
-  `local_read`: what the model cannot see it cannot re-encode. `/`, the
-  home directory and any folder above it are not accepted as allowed
-  folders.
+  `local_read`: what the model cannot see it cannot re-encode. An upload is
+  scanned again as it streams, and no byte leaves before the guard has
+  seen it, so a file that changes after its first scan cannot slip through.
+  `/`, the home directory and any folder above it are not accepted as
+  allowed folders.
 - **Downloads cannot plant anything.** Every file a download would create is
   resolved through the allowlist again and checked by name (case-insensitively):
   nothing credential-shaped, and nothing an editor or agent executes or
   trusts on opening a folder (`.vscode`, `.idea`, `.git`, `.husky`,
   `.envrc`, `.claude`, `.farhand.toml`, `CLAUDE.md`, ...). A refused name
-  aborts the whole download before the first byte is written. The data goes
-  to a randomly named temporary file created exclusively and without
-  following symlinks, then is renamed into place, so a link planted in the
-  folder is replaced rather than written through.
+  aborts the whole download before the first byte is written. Folders on
+  the way are opened and created without following symlinks, the data goes
+  to a randomly named temporary file created exclusively in its folder, and
+  is renamed into place within that same folder, so a link planted in the
+  folder is replaced rather than written through. The size limit is
+  enforced on the bytes actually read.
 - **Only hosts you have already met.** SSH host keys are checked strictly:
   a `.farhand.toml` that arrives inside a cloned repository cannot point the
   agent at a machine you never connected to. Connect once by hand first.
+- **No way back over SSH.** FarHand reads your ssh config through a wrapper
+  that clears every port forwarding (`RemoteForward`, `LocalForward`,
+  `DynamicForward`) and turns off agent, X11 and GSSAPI credential
+  forwarding for its connection, whatever `~/.ssh/config` says for the
+  host. Keys, jump hosts and everything else still come from your config.
 - **A project file can only tighten.** A `.farhand.toml` may arrive with a
   cloned repository, so it cannot loosen `[approval]` below the global
   config (or the default `ask`), allow local folders outside its own
-  directory, or move the audit log. Such settings are ignored, and
-  `farhand check` and `farhand validate` say which. Put them in the global
-  config instead.
+  directory, or move the audit log. A relative folder must still be inside
+  the project once symlinks are resolved, so an `assets` link to elsewhere
+  is not a way out. Such settings are ignored, and `farhand check` and
+  `farhand validate` say which. Put them in the global config instead. A
+  global config that exists but does not load stops FarHand rather than
+  being skipped.
 - **Everything is on record.** Every call, including refusals, is one line
   in the audit log. A log directory that cannot be written stops FarHand at
-  startup instead of losing records quietly.
+  startup, and a record that cannot be written later makes FarHand refuse
+  every further call until it is restarted.
 
 What FarHand does not do: it cannot stop a model that has legitimately read a
 non-secret file in the allowlist from sending it to the remote (that is the
 point of the allowlist), it does not restrict the remote itself (treat the
 remote account as the model's sandbox and give it only what that account
 should have), and it does not disable *other* MCP servers or tools your agent
-has that reach the local machine. Keep secrets out of `allowed_dirs`; the
-guard is a tripwire for accidents, not a substitute for that.
+has that reach the local machine. The agent integrations take the agent's own
+local tools away (Codex only at project scope), but that is the agent's
+setting, not a wall. Keep secrets out of `allowed_dirs`; the guard is a
+tripwire for accidents, not a substitute for that: a password, an archive or
+an encoded token can pass it. If the model must not reach the local machine
+even through a misconfigured agent, run the agent itself in a container or VM
+that mounts only the folder you allow.
 
 There is deliberately no local `curl`/fetch tool: `curl` reads local files
 (`-d @file`, `file://`) and reaches local-only services (Docker sockets,

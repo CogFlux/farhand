@@ -357,22 +357,35 @@ impl Guard {
     /// windows that overlap by `SCAN_OVERLAP`, so a secret sitting on a
     /// window boundary is still seen and memory stays flat.
     pub fn ensure_upload_file(&self, path: &Path) -> Result<()> {
+        self.ensure_upload_reader(path, &mut std::fs::File::open(path)?)
+    }
+
+    /// `ensure_upload_file` for a file already open as `file`.
+    pub fn ensure_upload_reader(&self, path: &Path, file: &mut impl std::io::Read) -> Result<()> {
         if let Some(f) = self.check_path(path) {
             return Err(f.deny(&format!("`{}`", path.display())));
         }
-        let mut file = std::fs::File::open(path)?;
         let mut window: Vec<u8> = Vec::with_capacity(SCAN_CHUNK + SCAN_OVERLAP);
         loop {
             let keep = window.len().saturating_sub(SCAN_OVERLAP);
             window.drain(..keep);
             let start = window.len();
             window.resize(start + SCAN_CHUNK, 0);
-            let n = read_up_to(&mut file, &mut window[start..])?;
+            let n = read_up_to(file, &mut window[start..])?;
             window.truncate(start + n);
             if n == 0 {
                 return Ok(());
             }
             self.ensure_content(&format!("the content of `{}`", path.display()), &window)?;
+        }
+    }
+
+    /// A scanner for content as it is sent: see [`StreamGuard`].
+    pub fn stream(&self, path: &Path) -> StreamGuard<'_> {
+        StreamGuard {
+            guard: self,
+            what: format!("the content of `{}`", path.display()),
+            held: Vec::new(),
         }
     }
 
@@ -393,6 +406,34 @@ impl Guard {
     }
 }
 
+/// Checks an upload in the form it actually leaves in, chunk by chunk, so
+/// a file that changes after its first scan cannot send what that scan
+/// never saw. The last `SCAN_OVERLAP` bytes are held back until the next
+/// chunk has been scanned with them, so a secret spanning two chunks is
+/// seen whole before any of it is released — the same windows
+/// `ensure_upload_file` uses.
+pub struct StreamGuard<'g> {
+    guard: &'g Guard,
+    what: String,
+    held: Vec<u8>,
+}
+
+impl StreamGuard<'_> {
+    /// Add `data`; returns the bytes that may now be sent.
+    pub fn feed(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.held.extend_from_slice(data);
+        self.guard.ensure_content(&self.what, &self.held)?;
+        let release = self.held.len().saturating_sub(SCAN_OVERLAP);
+        Ok(self.held.drain(..release).collect())
+    }
+
+    /// The bytes still held back at the end of the data; they were
+    /// scanned by the last `feed`.
+    pub fn finish(self) -> Vec<u8> {
+        self.held
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +441,28 @@ mod tests {
 
     fn guard() -> Guard {
         Guard::new(&GuardConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn stream_releases_nothing_a_later_chunk_could_complete() {
+        let g = guard();
+        let path = Path::new("data.bin");
+        let mut first = vec![b'x'; SCAN_CHUNK];
+        first.extend_from_slice(b" AKIAABCDEFGH");
+        let mut s = g.stream(path);
+        let sent = s.feed(&first).unwrap();
+        assert_eq!(sent.len(), first.len() - SCAN_OVERLAP);
+        assert!(!sent.windows(4).any(|w| w == b"AKIA"));
+        let err = s.feed(b"IJKLMNOP and more").unwrap_err().to_string();
+        assert!(err.contains("aws-access-key"), "{err}");
+
+        // Clean data comes out whole, in order.
+        let mut s = g.stream(path);
+        let mut out = s.feed(&first[..100]).unwrap();
+        out.extend(s.feed(&vec![b'y'; SCAN_CHUNK]).unwrap());
+        out.extend(s.finish());
+        assert_eq!(out.len(), 100 + SCAN_CHUNK);
+        assert_eq!(&out[..100], &first[..100]);
     }
 
     #[test]

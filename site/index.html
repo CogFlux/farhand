@@ -265,10 +265,10 @@ mode = "ask"               # ask | auto | strict</code></pre>
     <h3>The local side is closed</h3>
     <ul>
       <li>The only process FarHand starts locally is <code>ssh</code> to the configured host. No model-supplied string reaches a local command line, and there is deliberately no local <code>curl</code>.</li>
-      <li>Local reads are the allowlist minus credentials: symlinks are followed before the containment check, and files the guard would refuse to upload are hidden from the model entirely.</li>
+      <li>Local reads are the allowlist minus credentials: symlinks are followed before the containment check, files are then opened without following any symlink swapped in since, and files the guard would refuse to upload are hidden from the model entirely.</li>
       <li>Downloads cannot plant anything an editor or agent executes on opening a folder — <code>.vscode</code>, <code>.git</code>, <code>.husky</code>, <code>.claude</code>, <code>CLAUDE.md</code>, <code>.farhand.toml</code> — nor credential-shaped names. One refused name aborts the whole download before a byte is written.</li>
       <li>Host keys are checked strictly. A <code>.farhand.toml</code> inside a cloned repository cannot point the agent at a machine you never connected to.</li>
-      <li>Your local environment is never forwarded. Every call, including refusals, is one line in <code>~/.local/share/farhand/audit/</code>.</li>
+      <li>Your local environment, ssh agent and ports are never forwarded. Every call, including refusals, is one line in <code>~/.local/share/farhand/audit/</code>; if a line cannot be written, FarHand stops.</li>
     </ul>
     <p class="note">The remote is the model's sandbox: give that account only what it should have. The guard is a tripwire against accidents, not a substitute for keeping secrets out of the allowlisted folder.</p>
   </section>
