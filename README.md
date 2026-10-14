@@ -52,6 +52,20 @@ Or download `farhand-<version>-<target>.tar.gz` from the
 [releases page](https://github.com/CogFlux/farhand/releases) yourself, or
 `cargo binstall farhand`.
 
+**npm** (Node 18+) — a dependency-free wrapper that fetches the same
+release binary on first run, checksum verified:
+
+```
+npm i -g farhand
+```
+
+`farhand install` then writes the wrapper's entry, not the binary, into the
+agent's config, so `npm i -g farhand@latest` upgrades the agents too (the
+first run after an upgrade downloads the new binary); the agent needs `node`
+on its `PATH`. `npx farhand init` and `npx farhand check` are fine for a
+try, but `farhand install` refuses to run from npx's cache (or `pnpm dlx`,
+`bunx`), which is cleared behind the agent's back.
+
 **From source** (Rust stable): `cargo install --path crates/farhand`
 puts `farhand` in `~/.cargo/bin`; or `cargo build --release` and point
 `FARHAND_BIN` at `target/release/farhand`.

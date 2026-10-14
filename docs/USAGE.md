@@ -4,7 +4,8 @@
 
 ```
 curl -fsSL https://raw.githubusercontent.com/CogFlux/farhand/main/install.sh | sh
-#   or: npm i -g farhand   /   cargo binstall farhand   /   cargo install farhand
+#   or: npm i -g farhand (not npx: install needs a lasting copy)
+#       cargo binstall farhand   /   cargo install farhand
 mkdir -p ~/FarHand-Outbox                      # the folder the model may upload from
 farhand install opencode                       # and/or claude-code, codex
 ```

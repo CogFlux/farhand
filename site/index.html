@@ -324,8 +324,8 @@ mode = "ask"               # ask | auto | strict</code></pre>
       <p class="note">Downloads the release for your platform into <code>~/.local/bin</code> and verifies its SHA-256. <code>FARHAND_BIN_DIR</code> changes the location.</p>
     </div>
     <div class="panel" data-tab="npm">
-<pre><code>npm i -g farhand        # or: npx farhand ...</code></pre>
-      <p class="note">A dependency-free wrapper that fetches the matching release binary on first run.</p>
+<pre><code>npm i -g farhand</code></pre>
+      <p class="note">A dependency-free wrapper that fetches the matching release binary on first run. Agents set up with <code>farhand install</code> launch the wrapper, so <code>npm i -g farhand@latest</code> upgrades them too. <code>npx farhand check</code> works for a try; <code>farhand install</code> needs the global install.</p>
     </div>
     <div class="panel" data-tab="cargo">
 <pre><code>cargo binstall farhand   # prebuilt

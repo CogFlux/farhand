@@ -75,8 +75,40 @@ pub struct Options {
     pub project: PathBuf,
 }
 
+/// Set by the npm wrapper to its own real path: the entry an agent should
+/// launch. The binary it runs lives in a versioned folder that an upgrade
+/// deletes, so that is not a path to write into an agent's config.
+const LAUNCHER_ENV: &str = "FARHAND_LAUNCHER";
+
+/// What an agent's config should launch: the npm wrapper when FarHand runs
+/// through it, else this binary.
 fn exe() -> Result<PathBuf> {
-    std::env::current_exe().context("cannot determine the farhand binary path")
+    launcher_from(
+        std::env::var_os(LAUNCHER_ENV).filter(|v| !v.is_empty()),
+        std::env::current_exe().context("cannot determine the farhand binary path")?,
+    )
+}
+
+fn launcher_from(launcher: Option<std::ffi::OsString>, current: PathBuf) -> Result<PathBuf> {
+    let Some(launcher) = launcher.map(PathBuf::from) else {
+        return Ok(current);
+    };
+    // npx, `pnpm dlx` and bunx run packages from a cache that is cleared
+    // behind the agent's back.
+    let temporary = launcher.components().any(|c| {
+        let c = c.as_os_str().to_string_lossy();
+        c == "_npx" || c == "dlx" || c.starts_with("bunx-")
+    });
+    if temporary {
+        bail!(
+            "farhand is running from a temporary package cache ({}), and an agent set up from \
+             it would lose FarHand when that cache is cleared. Install it for good first \
+             (`npm i -g farhand`, or the install script in the README), then run \
+             `farhand install` again.",
+            launcher.display()
+        );
+    }
+    Ok(launcher)
 }
 
 fn xdg(var: &str, fallback: &str) -> PathBuf {
@@ -246,7 +278,10 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 /// The hook must resolve the same config as the server, so an explicit
 /// `--config` is baked into both.
 fn hook_command(opts: &Options) -> Result<String> {
-    let mut cmd = format!("{} {HOOK_MARKER}", exe()?.display());
+    let mut cmd = format!(
+        "{} {HOOK_MARKER}",
+        shell_word(&exe()?.display().to_string())
+    );
     if let Some(c) = &opts.config {
         cmd.push_str(&format!(
             " --config {}",
@@ -743,6 +778,25 @@ fn status_codex(opts: &Options) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_launch_the_npm_entry_not_its_versioned_binary() {
+        let bin = PathBuf::from("/x/node_modules/farhand/vendor/farhand-0.2.10-t/farhand");
+        assert_eq!(launcher_from(None, bin.clone()).unwrap(), bin);
+        let entry = "/opt/homebrew/lib/node_modules/farhand/bin/farhand.js";
+        assert_eq!(
+            launcher_from(Some(entry.into()), bin.clone()).unwrap(),
+            PathBuf::from(entry)
+        );
+        for cached in [
+            "/Users/u/.npm/_npx/0123abcd/node_modules/farhand/bin/farhand.js",
+            "/Users/u/Library/Caches/pnpm/dlx/abc/node_modules/farhand/bin/farhand.js",
+            "/tmp/bunx-501-farhand@latest/node_modules/farhand/bin/farhand.js",
+        ] {
+            let err = launcher_from(Some(cached.into()), bin.clone()).unwrap_err();
+            assert!(err.to_string().contains("npm i -g farhand"), "{err}");
+        }
+    }
 
     fn opts() -> Options {
         Options {

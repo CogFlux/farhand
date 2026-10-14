@@ -58,21 +58,34 @@ async function ensureBinary() {
   const actual = crypto.createHash("sha256").update(tarball).digest("hex");
   if (expected !== actual) throw new Error("checksum mismatch; refusing to install");
 
+  // Unpacked into a private folder and renamed into place, so an agent
+  // starting the server and its hook at once never runs a half-written
+  // binary; whichever process finishes second keeps the first one's copy.
   fs.mkdirSync(vendor, { recursive: true });
   const tmp = path.join(os.tmpdir(), `${name}-${process.pid}.tar.gz`);
+  const stage = fs.mkdtempSync(path.join(vendor, ".unpack-"));
   fs.writeFileSync(tmp, tarball);
   try {
-    execFileSync("tar", ["-C", vendor, "-xzf", tmp]);
+    execFileSync("tar", ["-C", stage, "-xzf", tmp]);
+    fs.chmodSync(path.join(stage, name, "farhand"), 0o755);
+    try {
+      fs.renameSync(path.join(stage, name), path.join(vendor, name));
+    } catch (e) {
+      if (!fs.existsSync(bin)) throw e;
+    }
   } finally {
     fs.rmSync(tmp, { force: true });
+    fs.rmSync(stage, { recursive: true, force: true });
   }
-  fs.chmodSync(bin, 0o755);
   return bin;
 }
 
 ensureBinary()
   .then((bin) => {
-    const r = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
+    // `farhand install` writes this script, not the versioned binary, into
+    // the agent's config, so an upgrade does not leave it pointing nowhere.
+    const env = { ...process.env, FARHAND_LAUNCHER: fs.realpathSync(__filename) };
+    const r = spawnSync(bin, process.argv.slice(2), { stdio: "inherit", env });
     if (r.error) throw r.error;
     process.exit(r.status === null ? 1 : r.status);
   })
