@@ -85,6 +85,24 @@ Configure).
 
 See `docs/USAGE.md` for the step-by-step guide and per-agent configuration.
 
+## Update
+
+`farhand --version` says which version you have. Update the way you
+installed:
+
+| Installed with | Update with |
+|---|---|
+| the install script | the same `curl … \| sh` again |
+| npm | `npm i -g farhand@latest` |
+| `cargo binstall` | `cargo binstall farhand` |
+| `cargo install` | `cargo install farhand` |
+| a checkout | `git pull && cargo install --path crates/farhand` |
+
+Then run `farhand install <agent>` once more for each agent you use (it
+changes nothing if nothing changed: the OpenCode plugin and Codex's
+approval settings are written from the binary at install time), and
+restart the agent, whose running server is still the old one.
+
 ## Configure
 
 `farhand init` prints a commented template. The essentials:

@@ -143,6 +143,11 @@ pub fn uninstall(agent: Agent, opts: &Options) -> Result<()> {
 }
 
 pub fn status(opts: &Options) -> Result<()> {
+    println!(
+        "farhand {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::current_exe()?.display()
+    );
     for agent in Agent::ALL {
         let lines = match agent {
             Agent::OpenCode => status_opencode(opts)?,

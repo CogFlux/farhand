@@ -10,6 +10,7 @@
 //! farhand uninstall <agent> [--scope user|project]
 //! farhand status [--scope user|project]
 //! farhand hook claude-code [--config PATH]    Claude Code PreToolUse hook (stdin JSON)
+//! farhand --version                           print the version
 //! ```
 //!
 //! Agents: opencode, claude-code, codex.
@@ -32,7 +33,7 @@ fn usage() -> ! {
          farhand install <opencode|claude-code|codex> [--scope user|project] [--config PATH]\n  \
          farhand uninstall <opencode|claude-code|codex> [--scope user|project]\n  \
          farhand status [--scope user|project]\n  \
-         farhand hook claude-code [--config PATH]"
+         farhand hook claude-code [--config PATH]\n  farhand --version"
     );
     std::process::exit(2);
 }
@@ -50,6 +51,10 @@ struct Args {
 fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     let command = it.next().unwrap_or_else(|| usage());
+    if matches!(command.as_str(), "--version" | "-V" | "version") {
+        println!("farhand {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
     let mut target = None;
     let mut config = None;
     let mut cwd = None;
