@@ -249,6 +249,8 @@ impl ApprovalMode {
 /// The tools that change something on the remote or in the outbox.
 pub const MUTATING_TOOLS: &[&str] = &[
     "remote_shell",
+    "remote_spawn",
+    "remote_kill",
     "remote_write",
     "remote_edit",
     "upload",
@@ -261,6 +263,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "remote_ls",
     "remote_glob",
     "remote_grep",
+    "remote_jobs",
     "local_ls",
     "local_read",
     "remote_info",
@@ -735,7 +738,8 @@ allowed_dirs = ["."]
 
 [approval]
 # "ask":    the agent prompts you before remote_shell, remote_write,
-#           remote_edit, upload and download; read-only tools run freely.
+#           remote_edit, remote_spawn, remote_kill, upload and download;
+#           read-only tools run freely.
 # "auto":   nothing prompts; the audit log is your record.
 # "strict": every tool prompts, reads and searches included.
 # A project .farhand.toml can make this stricter than the global config,

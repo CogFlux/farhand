@@ -12,6 +12,7 @@ use farhand_core::audit::{Audit, Record};
 use farhand_core::config::Config;
 use farhand_core::error::Error;
 use farhand_core::guard::Guard;
+use farhand_core::jobs::JobState;
 use farhand_core::local::LocalScope;
 use farhand_core::remote::{ps_quote, ExecOutput, Platform, Remote};
 use farhand_core::text::{bounded, numbered_window, shell_quote};
@@ -58,6 +59,21 @@ pub struct BashArgs {
     /// Seconds before the command is killed. Default and maximum come from
     /// the configuration.
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SpawnArgs {
+    /// The command to keep running on the remote host (a dev server, a
+    /// watcher). Same shell as remote_shell.
+    pub command: String,
+    /// Directory to run in (absolute, or relative to the remote workdir).
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct KillArgs {
+    /// The job id remote_spawn returned (see remote_jobs).
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -247,7 +263,10 @@ impl FarHand {
              remote_shell, remote_write and remote_edit for everything unless the user explicitly \
              says local; they replace the local shell and file tools, which are disabled. \
              remote_shell already runs on the remote: never ssh or scp from inside it to reach \
-             the same host or the user's machine. \
+             the same host or the user's machine. A process remote_shell starts in the \
+             background (`&`, nohup, Start-Process) is stopped when its command ends: to keep a \
+             dev server or watcher running across calls, start it with remote_spawn, read its \
+             log with remote_read, and stop it with remote_kill when done. \
              The local machine is closed except for these directories: {dirs}. Use local_ls and \
              local_read only when the user explicitly asks about those local folders, `upload` to \
              copy from them to the remote, and `download` to copy from the remote into them. \
@@ -317,6 +336,105 @@ impl FarHand {
                 rec.outcome = if out.timed_out { "timeout" } else { "ok" };
                 self.finish(rec, started);
                 Ok(exec_result(&out))
+            }
+            Err(e) => Ok(self.fail(rec, started, e)),
+        }
+    }
+
+    #[tool(
+        name = "remote_spawn",
+        description = "Start a long-running command ON THE REMOTE HOST in the background — a dev server, a file watcher, anything that must keep running after this call — and return at once. remote_shell cannot do this: a process it starts in the background (`&`, nohup, Start-Process) is stopped when its command ends. Output goes to a log file on the remote (read it with remote_read). Returns a job id; list jobs with remote_jobs and stop one with remote_kill."
+    )]
+    async fn remote_spawn(
+        &self,
+        Parameters(a): Parameters<SpawnArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let mut rec = Record::new("remote_spawn");
+        rec.command = Some(&a.command);
+        if let Err(e) = self.guard_args(&[
+            ("the command", Some(&a.command)),
+            ("the cwd", a.cwd.as_deref()),
+        ]) {
+            return Ok(self.refuse(rec, started, e));
+        }
+        match self
+            .inner()
+            .remote
+            .spawn(&a.command, a.cwd.as_deref())
+            .await
+        {
+            Ok(job) => {
+                let text = format!(
+                    "Started job {id} (pid {pid}) in {cwd}.\nOutput: {log} — read it with \
+                     remote_read. Check it with remote_jobs; stop it with remote_kill {id}.",
+                    id = job.id,
+                    pid = job.pid,
+                    cwd = job.cwd,
+                    log = job.log,
+                );
+                rec.target = Some(&job.id);
+                self.finish(rec, started);
+                Ok(ok(text))
+            }
+            Err(e) => Ok(self.fail(rec, started, e)),
+        }
+    }
+
+    #[tool(
+        name = "remote_jobs",
+        description = "List the background jobs started with remote_spawn on the remote host (by this or earlier sessions), newest first: id, running or exited with its status, pid, log file, command."
+    )]
+    async fn remote_jobs(&self) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let rec = Record::new("remote_jobs");
+        match self.inner().remote.jobs().await {
+            Ok(jobs) => {
+                self.finish(rec, started);
+                if jobs.is_empty() {
+                    return Ok(ok("No jobs (start one with remote_spawn)."));
+                }
+                let mut s = String::new();
+                for (job, state) in jobs {
+                    let state = match state {
+                        JobState::Running => "running".to_string(),
+                        JobState::Exited(code) => format!("exited {code}"),
+                        JobState::Gone => "stopped".to_string(),
+                    };
+                    let command = job.command.lines().next().unwrap_or("");
+                    s.push_str(&format!(
+                        "{}  {state}  pid {}  since {}\n  $ {command}\n  log: {}\n",
+                        job.id, job.pid, job.started, job.log
+                    ));
+                }
+                Ok(ok(s))
+            }
+            Err(e) => Ok(self.fail(rec, started, e)),
+        }
+    }
+
+    #[tool(
+        name = "remote_kill",
+        description = "Stop a background job started with remote_spawn, together with the processes it started."
+    )]
+    async fn remote_kill(
+        &self,
+        Parameters(a): Parameters<KillArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let mut rec = Record::new("remote_kill");
+        rec.target = Some(&a.id);
+        if let Err(e) = self.guard_args(&[("the job id", Some(&a.id))]) {
+            return Ok(self.refuse(rec, started, e));
+        }
+        match self.inner().remote.kill_job(&a.id).await {
+            Ok((job, was_running)) => {
+                self.finish(rec, started);
+                Ok(ok(if was_running {
+                    format!("Stopped job {} (pid {}).", job.id, job.pid)
+                } else {
+                    format!("Job {} was not running.", job.id)
+                }))
             }
             Err(e) => Ok(self.fail(rec, started, e)),
         }

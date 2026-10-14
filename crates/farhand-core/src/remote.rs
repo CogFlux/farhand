@@ -496,9 +496,19 @@ impl Remote {
         })
     }
 
+    /// The remote user's home, native form; connects if needed.
+    pub async fn home(&self) -> Result<String> {
+        Ok(self.conn().await?.home.clone())
+    }
+
+    /// The configured POSIX shell argv (`["bash", "-lc"]` by default).
+    pub(crate) fn shell(&self) -> &[String] {
+        &self.cfg.shell
+    }
+
     /// The PowerShell executable and any extra leading arguments, from
     /// `remote.shell` unless that is still the POSIX default.
-    fn powershell(&self) -> (&str, Vec<String>) {
+    pub(crate) fn powershell(&self) -> (&str, Vec<String>) {
         if self.cfg.shell == default_shell() || self.cfg.shell.is_empty() {
             ("powershell.exe", Vec::new())
         } else {
@@ -836,6 +846,31 @@ impl Remote {
         Ok(files)
     }
 
+    /// The names of the regular files directly in `dir` (a resolved native
+    /// path), over SFTP; none if `dir` does not exist.
+    pub async fn list_files(&self, dir: &str) -> Result<Vec<String>> {
+        let conn = self.conn().await?;
+        let _permit = self.channels.acquire().await.expect("semaphore open");
+        let Ok(handle) = conn
+            .sftp
+            .fs()
+            .open_dir(to_sftp_path(conn.platform, dir))
+            .await
+        else {
+            return Ok(Vec::new());
+        };
+        let mut names = Vec::new();
+        let mut entries = std::pin::pin!(handle.read_dir());
+        while let Some(entry) = entries.next().await {
+            let entry = entry.map_err(|e| Error::Ssh(format!("cannot list `{dir}`: {e}")))?;
+            if entry.file_type().is_some_and(|t| t.is_file()) {
+                names.push(entry.filename().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
     /// Whether a remote executable is on PATH.
     pub async fn has_tool(&self, name: &str) -> Result<bool> {
         let conn = self.conn().await?;
@@ -866,7 +901,7 @@ pub fn ps_quote(s: &str) -> String {
 }
 
 /// UTF-16LE base64, what `powershell -EncodedCommand` expects.
-fn encode_utf16_b64(script: &str) -> String {
+pub(crate) fn encode_utf16_b64(script: &str) -> String {
     let bytes: Vec<u8> = script
         .encode_utf16()
         .flat_map(|u| u.to_le_bytes())
@@ -1049,7 +1084,7 @@ fn unescape_clixml(s: &str) -> String {
 
 // ---- paths -----------------------------------------------------------------
 
-fn separator(p: Platform) -> char {
+pub(crate) fn separator(p: Platform) -> char {
     match p {
         Platform::Posix => '/',
         Platform::Windows => '\\',

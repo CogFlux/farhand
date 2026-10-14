@@ -12,6 +12,7 @@ pub mod audit;
 pub mod config;
 pub mod error;
 pub mod guard;
+pub mod jobs;
 pub mod local;
 pub mod remote;
 pub mod text;

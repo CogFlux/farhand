@@ -22,6 +22,7 @@ and everything that happens is written to a local audit log.
    remote_read/write  upload / download
    remote_edit/ls     (allowlisted folders only)
    remote_glob/grep
+   remote_spawn/jobs/kill
         │
    your OpenSSH: ~/.ssh/config, keys, agent, jump hosts — one multiplexed session
 ```
@@ -163,7 +164,8 @@ remotely.
 
 Approval is FarHand's knob, not the agent's: `[approval] mode = "ask"`
 (default) makes the agent prompt before `remote_shell`, `remote_write`,
-`remote_edit`, `upload` and `download` and lets read-only tools run;
+`remote_edit`, `remote_spawn`, `remote_kill`, `upload` and `download` and
+lets read-only tools run;
 `"auto"` prompts for nothing, with the audit log as the record; `"strict"`
 prompts for everything, reads included; `tools = { remote_write = "auto" }`
 overrides per tool. A project `.farhand.toml` can make this stricter but not
@@ -197,10 +199,21 @@ The tools then appear as `farhand_remote_shell`, `farhand_upload`, and so on.
 | `remote_write` | Create or overwrite a remote file; parents are created. |
 | `remote_edit` | Replace an exact, unique string in a remote file (`replace_all` optional; CRLF files are matched with LF strings and kept CRLF). |
 | `remote_ls` / `remote_glob` / `remote_grep` | `ls -la`, `rg --files -g`, `rg -n` on the remote. |
+| `remote_spawn` | Start a long-running command (dev server, watcher) in the background, detached from the session so it outlives the call; output goes to a log under `~/.farhand/jobs/` on the remote. |
+| `remote_jobs` / `remote_kill` | List those jobs (running, or exited with their status), and stop one with the processes it started. |
 | `local_ls` / `local_read` | Look inside the allowlisted local folders. |
 | `upload` | Copy a local file or folder (allowlist only, guard-checked) to the remote. |
 | `download` | Copy a remote file or folder into an allowlisted local folder (never credential-shaped names or files a local tool would execute). |
 | `remote_info` | Host, workdir, connection state, allowed folders, audit location. |
+
+A command run by `remote_shell` lives as long as its SSH channel: Windows
+OpenSSH kills every process the session started when the command ends,
+and on POSIX a background child that keeps the output open holds the
+command until its timeout kills it. `remote_spawn` starts the job outside
+the session instead — in a session of its own (`setsid`, or `perl` where
+there is none) on POSIX, through WMI (`Win32_Process.Create`) on Windows —
+and records it on the remote, so a later FarHand session still lists and
+stops it.
 
 ## What never leaves this machine
 

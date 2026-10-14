@@ -117,6 +117,7 @@ Start the agent in any local directory. What the model gets:
 | It wants to | It calls | You see in the audit log |
 |---|---|---|
 | run a command | `remote_shell` | command, exit code, duration |
+| keep a dev server or watcher running | `remote_spawn`, then `remote_jobs` / `remote_kill` | command, job id |
 | read / write / edit a file | `remote_read` / `remote_write` / `remote_edit` | path, bytes |
 | find files / search text | `remote_glob` / `remote_grep` | pattern |
 | look at your local outbox | `local_ls` / `local_read` | path |
