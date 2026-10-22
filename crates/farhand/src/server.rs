@@ -291,6 +291,12 @@ impl FarHand {
         Ok((detected, self.inner().remote.configured_platform()))
     }
 
+    /// Host folders passed read-write into the remote; see
+    /// [`farhand_core::remote::Remote::writable_host_shares`].
+    pub async fn writable_host_shares(&self) -> farhand_core::Result<Vec<String>> {
+        self.inner().remote.writable_host_shares().await
+    }
+
     /// The workdir with `~` expanded, and whether connecting just created it.
     pub async fn workdir_state(&self) -> farhand_core::Result<(String, bool)> {
         let remote = &self.inner().remote;

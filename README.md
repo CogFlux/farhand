@@ -140,6 +140,35 @@ turns every directory on the machine remote using its `[remote]`, and it is
 a convenient target for `--config`. Without any config at all, FarHand is
 simply inactive: the agent keeps its local tools and the server offers none.
 
+## Docker sandboxes
+
+The remote does not have to be another machine. A
+[Docker sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) is a microVM
+on this one, and since `sbx setup ssh` it is an SSH target, so FarHand uses
+it with no extra code: the agent and its keys stay on the host, commands and
+files go into the VM.
+
+```
+sbx setup ssh                     # once: adds `Host *.sbx` to ~/.ssh/config
+sbx create shell --name myproj    # no path: nothing of this machine is mounted
+```
+
+```toml
+[remote]
+host = "myproj.sbx"
+workdir = "~/workspace"
+os = "posix"
+```
+
+Create the sandbox **without a workspace path**, or with `--clone` (the
+host repository is mounted read-only and the sandbox works on its own
+clone). A sandbox created with a path, as in `sbx create shell .`, shares
+that folder with this machine read-write: everything the model writes there
+lands on the local disk at once, past every check `download` makes.
+`farhand check` warns when a `.sbx` host has such a mount. Authentication is
+your Docker login, so no SSH key is involved; get files in and out with
+`upload` and `download`, or with `git` from inside the sandbox.
+
 ## Agents
 
 `farhand install <agent>` does the wiring for `opencode`, `claude-code` and

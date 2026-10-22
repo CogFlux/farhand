@@ -33,6 +33,34 @@ anyway, but the model receives its instructions before the first command
 and should know which shell it is writing for. Paths in `workdir` and tool
 calls may use `/` or `\` (`C:/Users/me/proj`, `~/proj`).
 
+**A Docker sandbox on this machine** (`sbx`): the sandbox is the remote,
+reached over the SSH endpoint `sbx` provides. Once per machine, then once
+per sandbox:
+
+```
+sbx login
+sbx setup ssh                     # adds `Host *.sbx` to ~/.ssh/config
+sbx create shell --name myproj    # no workspace path
+ssh myproj.sbx -- true            # optional: the same connection FarHand makes
+```
+
+Then `host = "myproj.sbx"` and `workdir = "~/workspace"` in step 3. No SSH
+key is involved (the sandbox daemon checks your Docker login), and
+`sbx setup ssh` manages the host key, so there is nothing to accept by hand.
+The sandbox images ship `bash`, `ripgrep` and `setsid`; SFTP is served by
+the daemon, not by an sshd inside the VM.
+
+Never give FarHand a sandbox created with a workspace path
+(`sbx create shell .` or `sbx create shell ~/code/app`). sbx passes that
+folder through read-write at the same path, so a `remote_write` there is a
+write to your local disk that none of FarHand's download checks see: the
+model could plant `.git/hooks`, `.vscode/tasks.json` or `CLAUDE.md` in a
+local checkout. Use a sandbox without a path, or `sbx create --clone shell .`,
+which mounts the repository read-only and gives the sandbox its own clone
+(the sandbox's commits reach the host as the `sandbox-<name>` git remote).
+`farhand check` prints a `warning:` for every read-write host folder it
+finds in a `.sbx` sandbox.
+
 ## 3. Making a project remote
 
 In the local project's root:

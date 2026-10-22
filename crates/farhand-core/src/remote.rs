@@ -887,6 +887,59 @@ impl Remote {
             Platform::Windows => String::from_utf8_lossy(&out.stdout).contains("yes"),
         })
     }
+
+    /// Mount points of read-write `virtiofs` file systems on a POSIX
+    /// remote. That is how a microVM such as a Docker sandbox passes a host
+    /// folder straight through: whatever is written under one lands on the
+    /// host's disk at once, past every check `download` makes. Empty on
+    /// Windows and where `/proc/mounts` does not exist.
+    pub async fn writable_host_shares(&self) -> Result<Vec<String>> {
+        if self.platform().await? != Platform::Posix {
+            return Ok(Vec::new());
+        }
+        let out = self
+            .exec("cat /proc/mounts 2>/dev/null", None, Some(15))
+            .await?;
+        Ok(writable_virtiofs_mounts(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    }
+}
+
+/// The mount points of the read-write `virtiofs` entries in `/proc/mounts`.
+fn writable_virtiofs_mounts(mounts: &str) -> Vec<String> {
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            (f.len() >= 4 && f[2] == "virtiofs" && f[3].split(',').any(|o| o == "rw"))
+                .then(|| unescape_mount_field(f[1]))
+        })
+        .collect()
+}
+
+/// `/proc/mounts` writes space, tab, newline and backslash in a path as
+/// `\ooo` octal escapes.
+fn unescape_mount_field(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let octal = b
+            .get(i + 1..i + 4)
+            .filter(|d| d.iter().all(|c| (b'0'..=b'7').contains(c)));
+        match (b[i], octal) {
+            (b'\\', Some(d)) => {
+                out.push(d.iter().fold(0u8, |n, c| n.wrapping_mul(8) + (c - b'0')));
+                i += 4;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn not_found(path: &str, e: openssh_sftp_client::Error) -> Error {
@@ -1380,6 +1433,24 @@ fn write_all_at(file: &std::fs::File, mut buf: &[u8], mut offset: u64) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_read_write_virtiofs_mounts_are_host_shares() {
+        let mounts = "overlay / overlay rw,relatime,lowerdir=/a:/b 0 0\n\
+                      /dev/vdd /var/lib/docker ext4 rw,relatime 0 0\n\
+                      bind-95f0 /etc/resolv.conf virtiofs ro,relatime 0 0\n\
+                      bind-1a2b /run/sandbox/source virtiofs ro,relatime 0 0\n\
+                      bind-3c4d /Users/me/My\\040Project virtiofs rw,relatime 0 0\n\
+                      bind-5e6f /Users/me/odd\\134name virtiofs relatime,rw 0 0\n\
+                      short line\n";
+        assert_eq!(
+            writable_virtiofs_mounts(mounts),
+            ["/Users/me/My Project", "/Users/me/odd\\name"]
+        );
+        assert!(writable_virtiofs_mounts("").is_empty());
+        assert_eq!(unescape_mount_field("a\\04"), "a\\04");
+        assert_eq!(unescape_mount_field("a\\011b"), "a\tb");
+    }
 
     #[cfg(unix)]
     #[test]

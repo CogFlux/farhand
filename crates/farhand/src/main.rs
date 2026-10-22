@@ -254,6 +254,19 @@ async fn main() -> anyhow::Result<()> {
                     platform.name()
                 );
             }
+            // A Docker sandbox created with a workspace path shares that
+            // folder with this machine read-write: the remote would be
+            // writing straight onto the local disk.
+            if is_sbx_host(&cfg.remote.host) {
+                for share in server.writable_host_shares().await? {
+                    println!(
+                        "warning:    `{share}` is a folder of this machine mounted read-write \
+                         into the sandbox: whatever the model writes there lands on the local \
+                         disk at once, past download's checks. Recreate the sandbox without a \
+                         workspace (`sbx create shell`) or with `--clone`"
+                    );
+                }
+            }
             if args.verbose {
                 println!(
                     "\n── instructions the model receives (verbatim, via MCP initialize) ──\n\n{}",
@@ -297,5 +310,29 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => usage(),
+    }
+}
+
+/// Whether `host` names a Docker sandbox through the ssh config that
+/// `sbx setup ssh` writes: `<name>.sbx`, or `<name>.sbx-<app>` for a named
+/// app instance.
+fn is_sbx_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    let name = h.rsplit_once('@').map_or(h.as_str(), |(_, n)| n);
+    name.ends_with(".sbx") || name.contains(".sbx-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sbx_hosts_are_recognised_by_name() {
+        for h in ["demo.sbx", "Demo.SBX", "agent@demo.sbx", "demo.sbx-codex"] {
+            assert!(is_sbx_host(h), "{h}");
+        }
+        for h in ["devbox", "sbx", "demo.sbxfoo", "user@host.example"] {
+            assert!(!is_sbx_host(h), "{h}");
+        }
     }
 }
