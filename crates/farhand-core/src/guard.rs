@@ -8,7 +8,8 @@
 //!   that embed API keys, ...);
 //! - **content**: the bytes contain something shaped like a credential
 //!   (private-key blocks, well-known token prefixes, a `key = "..."`
-//!   assignment with a high-entropy value).
+//!   assignment whose value is a literal, not a variable name, and not a
+//!   low-entropy placeholder).
 //!
 //! The guard errs toward refusing. A false positive costs one retry with a
 //! clear message; a false negative puts a credential on a machine the user
@@ -17,7 +18,7 @@
 use std::path::{Component, Path};
 
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
-use regex::bytes::{Regex, RegexSet, RegexSetBuilder};
+use regex::bytes::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 
 use crate::config::GuardConfig;
 use crate::error::{Error, Result};
@@ -145,11 +146,19 @@ const DENIED_CONTENT: &[(&str, &str)] = &[
         "url-with-password",
         r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]{6,}@[^\s/]+",
     ),
-    (
-        "credential-assignment",
-        r"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|token|secret)['\x22]?\s*[:=]\s*['\x22]?[A-Za-z0-9_./+=-]{24,}",
-    ),
+    ("credential-assignment", CREDENTIAL_ASSIGNMENT),
 ];
+
+/// `key = value` with a credential-like key. A regex hit is only a
+/// candidate: [`assigned_value_is_secret`] decides on the value, so
+/// `token = args.token_from_command_line` is code, not a credential.
+/// Group 1 is the opening quote of the value, if any; group 2 the value.
+const CREDENTIAL_ASSIGNMENT: &str = r"(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|token|secret)['\x22]?\s*[:=]\s*(['\x22]?)([A-Za-z0-9_./+=-]{24,})";
+
+/// Below this many bits per byte a value is a placeholder (`xxxx…`,
+/// `0000…`), not a credential. Random tokens of this length score above
+/// 4; a human passphrase of 24+ characters still scores above 3.
+const MIN_SECRET_ENTROPY: f64 = 3.0;
 
 /// Names that may never be *created* locally by a download, on top of
 /// [`DENIED_NAMES`] and [`DENIED_DIRS`]: files and directories an editor,
@@ -221,6 +230,7 @@ pub struct Guard {
     extra_paths: GlobSet,
     content_names: Vec<&'static str>,
     content: RegexSet,
+    assignment: Regex,
     extra_content: Vec<Regex>,
 }
 
@@ -244,6 +254,10 @@ impl Guard {
             .unicode(false)
             .build()
             .map_err(|e| Error::Config(e.to_string()))?;
+        let assignment = RegexBuilder::new(CREDENTIAL_ASSIGNMENT)
+            .unicode(false)
+            .build()
+            .map_err(|e| Error::Config(e.to_string()))?;
         let extra_content = cfg
             .deny_content
             .iter()
@@ -254,6 +268,7 @@ impl Guard {
             extra_paths: extra.build().map_err(|e| Error::Config(e.to_string()))?,
             content_names: DENIED_CONTENT.iter().map(|(n, _)| *n).collect(),
             content,
+            assignment,
             extra_content,
         })
     }
@@ -319,10 +334,13 @@ impl Guard {
 
     /// Why these bytes may not be sent, if they may not.
     pub fn check_content(&self, bytes: &[u8]) -> Option<Finding> {
-        let hits = self.content.matches(bytes);
-        if let Some(i) = hits.iter().next() {
+        for i in self.content.matches(bytes).iter() {
+            let rule = self.content_names[i];
+            if rule == "credential-assignment" && !self.has_secret_assignment(bytes) {
+                continue;
+            }
             return Some(Finding {
-                rule: self.content_names[i],
+                rule,
                 detail: "content matched".into(),
             });
         }
@@ -335,6 +353,13 @@ impl Guard {
             }
         }
         None
+    }
+
+    /// Whether any `CREDENTIAL_ASSIGNMENT` hit in `bytes` assigns a secret.
+    fn has_secret_assignment(&self, bytes: &[u8]) -> bool {
+        self.assignment
+            .captures_iter(bytes)
+            .any(|c| assigned_value_is_secret(&c[2], !c[1].is_empty()))
     }
 
     /// Refuse if `bytes` (described as `what` in the message) carry a secret.
@@ -404,6 +429,85 @@ impl Guard {
             None => Ok(()),
         }
     }
+}
+
+/// Whether the value of a credential-like assignment is a credential.
+/// A quoted value is a literal, so only placeholders pass. An unquoted one
+/// may be code (`process.env.GITHUB_TOKEN`, `args.password_from_cli`), so a
+/// value that reads as a dotted chain of identifiers passes too; an
+/// unquoted `.env` or YAML secret is random, not made of words.
+fn assigned_value_is_secret(value: &[u8], quoted: bool) -> bool {
+    if entropy(value) < MIN_SECRET_ENTROPY {
+        return false;
+    }
+    quoted || !reads_as_identifiers(value)
+}
+
+/// Shannon entropy of `bytes`, in bits per byte.
+fn entropy(bytes: &[u8]) -> f64 {
+    let mut counts = [0usize; 256];
+    for &b in bytes {
+        counts[b as usize] += 1;
+    }
+    let len = bytes.len() as f64;
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / len;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// Whether `value` splits on `.` and `_` into words (`snake`, `SHOUT`,
+/// `camelCase`, `PascalCase`, up to three trailing digits as in `sha256`),
+/// with at least two words in all. One long unbroken run of letters is not
+/// an identifier anyone writes; it is more likely a random password.
+fn reads_as_identifiers(value: &[u8]) -> bool {
+    let mut words = 0;
+    for seg in value.split(|&b| b == b'.' || b == b'_') {
+        if seg.is_empty() {
+            continue;
+        }
+        match word_count(seg) {
+            Some(n) => words += n,
+            None => return false,
+        }
+    }
+    words >= 2
+}
+
+/// How many words one identifier segment holds, or `None` if it is not
+/// made of words. Random mixed-case text fails on the first two capitals
+/// in a row after its start, or on digits anywhere but the end.
+fn word_count(seg: &[u8]) -> Option<usize> {
+    let digits = seg.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    let body = &seg[..seg.len() - digits];
+    if digits > 3 || body.is_empty() || !body.iter().all(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    // A leading run of capitals and/or lowercase (`HTTPServer`, `get`,
+    // `TOKEN`) is the first word; each later word is a capital followed
+    // by lowercase.
+    let mut i = body.iter().take_while(|b| b.is_ascii_uppercase()).count();
+    i += body[i..]
+        .iter()
+        .take_while(|b| b.is_ascii_lowercase())
+        .count();
+    let mut words = 1;
+    while i < body.len() {
+        let lower = body[i + 1..]
+            .iter()
+            .take_while(|b| b.is_ascii_lowercase())
+            .count();
+        if lower == 0 {
+            return None;
+        }
+        i += 1 + lower;
+        words += 1;
+    }
+    Some(words)
 }
 
 /// Checks an upload in the form it actually leaves in, chunk by chunk, so
@@ -602,6 +706,29 @@ mod tests {
                 "\"apiKey\": \"a1b2c3d4e5f6g7h8i9j0k1l2m3n4\"",
                 "credential-assignment",
             ),
+            // Quoted literals are refused even when they read as words.
+            (
+                "password = \"correct_horse_battery_staple\"",
+                "credential-assignment",
+            ),
+            (
+                "client_secret: 'aBcDeFgHiJkLmNoPqRsTuVwXyZ'",
+                "credential-assignment",
+            ),
+            // Unquoted `.env` / YAML values that are not identifiers.
+            ("TOKEN=Zx9Qm2Lp7Rt4Vb8Nc1Kd6Hf3Jg5", "credential-assignment"),
+            ("PASSWORD=kqzjwhxmvtrplbnfgsdcyeua", "credential-assignment"),
+            ("secret: QWERTYUIOPASDFGHJKLZXCVB", "credential-assignment"),
+            (
+                "access_token: dGhpcyBpcyBub3QgYSByZWFsIHRva2Vu",
+                "credential-assignment",
+            ),
+            // A harmless assignment earlier in the text does not hide a
+            // real one after it.
+            (
+                "token = challenge_response_json_token\napi_key = \"a1b2c3d4e5f6g7h8i9j0k1l2m3n4\"",
+                "credential-assignment",
+            ),
         ];
         for (text, rule) in cases {
             let f = g
@@ -622,6 +749,17 @@ mod tests {
             "export OPENAI_API_KEY=$(cat ~/.secrets/openai)",
             "curl -H 'Authorization: Bearer $TOKEN' https://x",
             "git clone https://github.com/CogFlux/farhand.git",
+            // Variable names and attribute chains, not values.
+            "token = challenge_response_json_token",
+            "password = args.password_from_command_line",
+            "token: process.env.GITHUB_TOKEN,",
+            "secret_key = settings.SECRET_KEY_BASE_FOR_PROD",
+            "let token = getAccessTokenFromHeader(req);",
+            "password = config.db2.password_hash_sha256",
+            "access_token = self.HTTPServer.currentAccessToken",
+            // Placeholders.
+            "\"apiKey\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxx\"",
+            "API_KEY=000000000000000000000000",
         ] {
             assert!(
                 g.check_content(text.as_bytes()).is_none(),

@@ -258,7 +258,8 @@ globs) — passes the secret guard first:
 - **by content**: private-key blocks, `sk-…`, `ghp_…` / `github_pat_…`,
   `AKIA…`, `AIza…`, `xox…`, Stripe, JWTs, `Authorization: Bearer …`, URLs
   with embedded passwords, and `api_key = "<24+ random chars>"` style
-  assignments.
+  assignments (an unquoted variable or attribute chain such as
+  `token = process.env.GITHUB_TOKEN` is code, not a credential, and passes).
 
 Add your own with `[guard] deny_globs` / `deny_content`. A refusal comes back
 to the model as a tool error naming the rule, never the matched text, and is
