@@ -31,6 +31,7 @@ tracing-subscriber.workspace = true
 schemars.workspace = true
 rmcp.workspace = true
 toml_edit.workspace = true
+similar.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]

@@ -70,6 +70,7 @@ pub enum Scope {
 
 pub struct Options {
     pub scope: Scope,
+    pub confirm: Confirm,
     /// Explicit config path baked into the agent's launch command.
     pub config: Option<PathBuf>,
     /// The project directory for `Scope::Project`.
@@ -128,19 +129,221 @@ fn home() -> PathBuf {
 // ---- public entry points ----------------------------------------------------
 
 pub fn install(agent: Agent, opts: &Options) -> Result<()> {
-    match agent {
-        Agent::OpenCode => install_opencode(opts),
-        Agent::ClaudeCode => install_claude(opts),
-        Agent::Codex => install_codex(opts),
-    }
+    let plan = match agent {
+        Agent::OpenCode => plan_install_opencode(opts)?,
+        Agent::ClaudeCode => plan_install_claude(opts)?,
+        Agent::Codex => plan_install_codex(opts)?,
+    };
+    carry_out(&plan, opts)
 }
 
 pub fn uninstall(agent: Agent, opts: &Options) -> Result<()> {
-    match agent {
-        Agent::OpenCode => uninstall_opencode(),
-        Agent::ClaudeCode => uninstall_claude(opts),
-        Agent::Codex => uninstall_codex(opts),
+    let plan = match agent {
+        Agent::OpenCode => plan_uninstall_opencode()?,
+        Agent::ClaudeCode => plan_uninstall_claude(opts)?,
+        Agent::Codex => plan_uninstall_codex(opts)?,
+    };
+    carry_out(&plan, opts)
+}
+
+// ---- plans ------------------------------------------------------------------
+//
+// `install` and `uninstall` work out every change first, show it — a diff
+// for each file, the command line for each agent CLI call — and make it
+// only once the user agrees, or passed `--yes`. `--dry-run` only shows.
+
+/// How `install` and `uninstall` go from a plan to changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirm {
+    /// Show the plan and ask; refuse without a terminal to ask on.
+    Ask,
+    /// Show the plan and apply it.
+    Yes,
+    /// Show the plan only.
+    DryRun,
+}
+
+enum Change {
+    /// Write `after` to `path`; `before` is what is there now. With a
+    /// `summary`, that is shown instead of the diff.
+    Write {
+        path: PathBuf,
+        before: Option<String>,
+        after: String,
+        summary: Option<&'static str>,
+    },
+    Remove {
+        path: PathBuf,
+    },
+    /// Run the agent's own CLI, for files that it owns.
+    RunClaude {
+        args: Vec<String>,
+    },
+}
+
+struct Plan {
+    title: String,
+    changes: Vec<Change>,
+    /// Shown with the plan: what is already in place or left alone.
+    notes: Vec<String>,
+    /// Shown once the changes are made: what the user still has to do.
+    next: Vec<String>,
+}
+
+impl Plan {
+    fn new(verb: &str, agent: Agent, opts: &Options) -> Self {
+        let scope = match opts.scope {
+            Scope::User => "user scope",
+            Scope::Project => "project scope",
+        };
+        Plan {
+            title: format!("farhand {verb} {agent} ({scope})"),
+            changes: Vec::new(),
+            notes: Vec::new(),
+            next: Vec::new(),
+        }
     }
+
+    /// Add a write of `after` to `path`, unless the file already holds it.
+    fn write(
+        &mut self,
+        path: PathBuf,
+        after: String,
+        summary: Option<&'static str>,
+    ) -> Result<bool> {
+        let before = if path.is_file() {
+            Some(std::fs::read_to_string(&path)?)
+        } else {
+            None
+        };
+        if before.as_deref() == Some(after.as_str()) {
+            self.notes
+                .push(format!("{} is already up to date", path.display()));
+            return Ok(false);
+        }
+        self.changes.push(Change::Write {
+            path,
+            before,
+            after,
+            summary,
+        });
+        Ok(true)
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::new();
+        if self.changes.is_empty() {
+            out.push_str(&format!("{}: nothing to change\n", self.title));
+        } else {
+            out.push_str(&format!("{} will make these changes:\n", self.title));
+        }
+        for change in &self.changes {
+            match change {
+                Change::Write {
+                    path,
+                    before,
+                    after,
+                    summary,
+                } => {
+                    let verb = if before.is_some() { "modify" } else { "create" };
+                    out.push_str(&format!("\n  {verb} {}\n", path.display()));
+                    match summary {
+                        Some(s) => out.push_str(&format!("    {s}\n")),
+                        None => {
+                            let old = before.as_deref().unwrap_or("");
+                            let diff = similar::TextDiff::from_lines(old, after.as_str());
+                            let unified = diff.unified_diff().context_radius(2).to_string();
+                            for line in unified.lines() {
+                                out.push_str(&format!("    {line}\n"));
+                            }
+                        }
+                    }
+                }
+                Change::Remove { path } => {
+                    out.push_str(&format!("\n  delete {}\n", path.display()));
+                }
+                Change::RunClaude { args } => {
+                    let line: Vec<String> = args.iter().map(|a| shell_word(a)).collect();
+                    out.push_str(&format!("\n  run: claude {}\n", line.join(" ")));
+                }
+            }
+        }
+        for note in &self.notes {
+            out.push_str(&format!("  ({note})\n"));
+        }
+        out
+    }
+
+    fn apply(&self) -> Result<()> {
+        for change in &self.changes {
+            match change {
+                Change::Write { path, after, .. } => {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(path, after)
+                        .with_context(|| format!("cannot write {}", path.display()))?;
+                }
+                Change::Remove { path } => std::fs::remove_file(path)
+                    .with_context(|| format!("cannot delete {}", path.display()))?,
+                Change::RunClaude { args } => {
+                    let out = claude_cli()?.args(args).output()?;
+                    if !out.status.success() {
+                        bail!(
+                            "`claude {}` failed: {}",
+                            args.join(" "),
+                            String::from_utf8_lossy(&out.stderr).trim()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Show the plan, then apply it if `opts.confirm` and the user allow.
+fn carry_out(plan: &Plan, opts: &Options) -> Result<()> {
+    print!("{}", plan.render());
+    if plan.changes.is_empty() {
+        return Ok(());
+    }
+    let go = match opts.confirm {
+        Confirm::Yes => true,
+        Confirm::DryRun => {
+            println!("\ndry run: nothing was changed");
+            false
+        }
+        Confirm::Ask => ask_to_apply()?,
+    };
+    if !go {
+        return Ok(());
+    }
+    plan.apply()?;
+    println!("\ndone.");
+    for line in &plan.next {
+        println!("- {line}");
+    }
+    Ok(())
+}
+
+fn ask_to_apply() -> Result<bool> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "nothing was changed: there is no terminal to confirm on. Rerun with --yes to make \
+             the changes above, or --dry-run to only show them."
+        );
+    }
+    print!("\nApply these changes? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    let yes = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if !yes {
+        println!("nothing was changed");
+    }
+    Ok(yes)
 }
 
 pub fn status(opts: &Options) -> Result<()> {
@@ -194,38 +397,41 @@ fn rendered_plugin(opts: &Options) -> Result<String> {
         .replace(PLUGIN_CONFIG_PLACEHOLDER, &config))
 }
 
-fn install_opencode(opts: &Options) -> Result<()> {
+fn plan_install_opencode(opts: &Options) -> Result<Plan> {
+    let mut plan = Plan::new("install", Agent::OpenCode, opts);
     let path = opencode_plugin_path();
     if path.is_symlink() {
-        println!(
-            "opencode: {} is a symlink (development install); leaving it alone",
+        plan.notes.push(format!(
+            "{} is a symlink (development install); left alone",
             path.display()
-        );
-        return Ok(());
+        ));
+        return Ok(plan);
     }
-    let content = rendered_plugin(opts)?;
-    if path.is_file() && std::fs::read_to_string(&path)? == content {
-        println!("opencode: plugin already up to date at {}", path.display());
-        return Ok(());
+    let summary = "FarHand's OpenCode plugin: registers the farhand MCP server, turns \
+                   OpenCode's local tools off wherever FarHand is active, and tells the model \
+                   it works remotely";
+    if plan.write(path, rendered_plugin(opts)?, Some(summary))? {
+        plan.next
+            .push("restart OpenCode; tools appear as farhand_remote_shell etc.".into());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, content)?;
-    println!("opencode: wrote plugin to {}", path.display());
-    println!("opencode: restart OpenCode; tools appear as farhand_remote_shell etc.");
-    Ok(())
+    Ok(plan)
 }
 
-fn uninstall_opencode() -> Result<()> {
+fn plan_uninstall_opencode() -> Result<Plan> {
+    let opts = Options {
+        scope: Scope::User,
+        confirm: Confirm::Ask,
+        config: None,
+        project: PathBuf::new(),
+    };
+    let mut plan = Plan::new("uninstall", Agent::OpenCode, &opts);
     let path = opencode_plugin_path();
     if path.is_symlink() || path.exists() {
-        std::fs::remove_file(&path)?;
-        println!("opencode: removed {}", path.display());
+        plan.changes.push(Change::Remove { path });
     } else {
-        println!("opencode: nothing installed");
+        plan.notes.push("the plugin is not installed".into());
     }
-    Ok(())
+    Ok(plan)
 }
 
 fn status_opencode(opts: &Options) -> Result<Vec<String>> {
@@ -269,16 +475,6 @@ fn read_json(path: &Path) -> Result<Value> {
         return Ok(json!({}));
     }
     serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))
-}
-
-fn write_json(path: &Path, value: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut text = serde_json::to_string_pretty(value)?;
-    text.push('\n');
-    std::fs::write(path, text)?;
-    Ok(())
 }
 
 /// The hook must resolve the same config as the server, so an explicit
@@ -452,33 +648,50 @@ fn claude_mcp_registered() -> Result<bool> {
     Ok(out.status.success())
 }
 
-fn install_claude(opts: &Options) -> Result<()> {
+fn json_text(value: &Value) -> Result<String> {
+    let mut text = serde_json::to_string_pretty(value)?;
+    text.push('\n');
+    Ok(text)
+}
+
+/// The `farhand` entry `claude mcp add --scope user` wrote, read without
+/// touching the file: `claude mcp` owns it.
+fn claude_user_server() -> Option<Value> {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(home);
+    let doc = read_json(&dir.join(".claude.json")).ok()?;
+    doc.pointer("/mcpServers/farhand").cloned()
+}
+
+fn plan_install_claude(opts: &Options) -> Result<Plan> {
+    let mut plan = Plan::new("install", Agent::ClaudeCode, opts);
     let serve = serve_command(opts)?;
     match opts.scope {
         Scope::User => {
             // `claude mcp add` owns ~/.claude.json; never edit that file by hand.
-            if claude_mcp_registered()? {
-                let _ = claude_cli()?
-                    .args(["mcp", "remove", "--scope", "user", "farhand"])
-                    .output();
+            let current = claude_user_server();
+            let same = current
+                .as_ref()
+                .is_some_and(|c| c["command"] == json!(serve[0]) && c["args"] == json!(serve[1..]));
+            if same {
+                plan.notes
+                    .push("the MCP server `farhand` is already registered".into());
+            } else {
+                if current.is_some() {
+                    plan.changes.push(Change::RunClaude {
+                        args: ["mcp", "remove", "--scope", "user", "farhand"]
+                            .map(String::from)
+                            .to_vec(),
+                    });
+                }
+                let mut args: Vec<String> = ["mcp", "add", "--scope", "user", "farhand", "--"]
+                    .map(String::from)
+                    .to_vec();
+                args.extend(serve.iter().cloned());
+                plan.changes.push(Change::RunClaude { args });
             }
-            let mut args: Vec<String> = vec![
-                "mcp".into(),
-                "add".into(),
-                "--scope".into(),
-                "user".into(),
-                "farhand".into(),
-                "--".into(),
-            ];
-            args.extend(serve.iter().cloned());
-            let out = claude_cli()?.args(&args).output()?;
-            if !out.status.success() {
-                return Err(anyhow!(
-                    "`claude mcp add` failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
-            println!("claude-code: registered MCP server `farhand` (user scope)");
         }
         Scope::Project => {
             let path = opts.project.join(".mcp.json");
@@ -494,14 +707,10 @@ fn install_claude(opts: &Options) -> Result<()> {
             if !servers.is_object() {
                 *servers = json!({});
             }
-            let entry = json!({ "command": serve[0], "args": serve[1..] });
-            if servers["farhand"] != entry {
-                servers["farhand"] = entry;
-                write_json(&path, &doc)?;
-                println!("claude-code: wrote MCP server to {}", path.display());
-            } else {
-                println!("claude-code: {} already up to date", path.display());
-            }
+            servers["farhand"] = json!({ "command": serve[0], "args": serve[1..] });
+            plan.write(path, json_text(&doc)?, None)?;
+            plan.next
+                .push("Claude Code asks you to approve the project's .mcp.json once".into());
         }
     }
 
@@ -509,45 +718,40 @@ fn install_claude(opts: &Options) -> Result<()> {
     let static_deny = opts.scope == Scope::Project;
     let mut settings = read_json(&path)?;
     if apply_claude_settings(&mut settings, static_deny, opts)? {
-        write_json(&path, &settings)?;
-        if static_deny {
-            println!(
-                "claude-code: denied {} and added the PreToolUse hook in {}",
-                CLAUDE_LOCAL_TOOLS.join(", "),
-                path.display()
-            );
-        } else {
-            println!(
-                "claude-code: added the PreToolUse hook in {} (it refuses local tools wherever \
-                 FarHand is active; set activation = \"project\" in the global config to keep \
-                 other directories local)",
-                path.display()
-            );
-        }
+        plan.write(path, json_text(&settings)?, None)?;
     } else {
-        println!("claude-code: {} already up to date", path.display());
+        plan.notes
+            .push(format!("{} is already up to date", path.display()));
     }
-    println!("claude-code: approval follows [approval] in the FarHand config at call time");
-    Ok(())
+    if !plan.changes.is_empty() {
+        plan.next.push(match opts.scope {
+            Scope::User => "the hook refuses Claude Code's local tools wherever FarHand is \
+                            active; restart Claude Code"
+                .into(),
+            Scope::Project => format!(
+                "{} are denied in this project; restart Claude Code",
+                CLAUDE_LOCAL_TOOLS.join(", ")
+            ),
+        });
+        plan.next
+            .push("approval follows [approval] in the FarHand config at call time".into());
+    }
+    Ok(plan)
 }
 
-fn uninstall_claude(opts: &Options) -> Result<()> {
+fn plan_uninstall_claude(opts: &Options) -> Result<Plan> {
+    let mut plan = Plan::new("uninstall", Agent::ClaudeCode, opts);
     match opts.scope {
         Scope::User => {
-            if claude_mcp_registered()? {
-                let out = claude_cli()?
-                    .args(["mcp", "remove", "--scope", "user", "farhand"])
-                    .output()?;
-                if out.status.success() {
-                    println!("claude-code: removed MCP server `farhand`");
-                } else {
-                    println!(
-                        "claude-code: `claude mcp remove` failed: {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
-                }
+            if claude_user_server().is_some() {
+                plan.changes.push(Change::RunClaude {
+                    args: ["mcp", "remove", "--scope", "user", "farhand"]
+                        .map(String::from)
+                        .to_vec(),
+                });
             } else {
-                println!("claude-code: MCP server not registered");
+                plan.notes
+                    .push("the MCP server `farhand` is not registered at user scope".into());
             }
         }
         Scope::Project => {
@@ -555,8 +759,7 @@ fn uninstall_claude(opts: &Options) -> Result<()> {
             let mut doc = read_json(&path)?;
             if let Some(servers) = doc.get_mut("mcpServers").and_then(Value::as_object_mut) {
                 if servers.remove("farhand").is_some() {
-                    write_json(&path, &doc)?;
-                    println!("claude-code: removed farhand from {}", path.display());
+                    plan.write(path, json_text(&doc)?, None)?;
                 }
             }
         }
@@ -565,15 +768,14 @@ fn uninstall_claude(opts: &Options) -> Result<()> {
     if path.exists() {
         let mut settings = read_json(&path)?;
         if strip_claude_settings(&mut settings) {
-            write_json(&path, &settings)?;
-            println!(
-                "claude-code: removed the {} deny entries and the hook from {}",
-                CLAUDE_LOCAL_TOOLS.join(", "),
-                path.display()
-            );
+            plan.write(path, json_text(&settings)?, None)?;
+            plan.notes.push(format!(
+                "a {} deny entry you wrote yourself is removed too",
+                CLAUDE_LOCAL_TOOLS.join(" / ")
+            ));
         }
     }
-    Ok(())
+    Ok(plan)
 }
 
 fn status_claude(opts: &Options) -> Result<Vec<String>> {
@@ -653,7 +855,8 @@ fn implicit_table() -> toml_edit::Item {
     toml_edit::Item::Table(t)
 }
 
-fn install_codex(opts: &Options) -> Result<()> {
+fn plan_install_codex(opts: &Options) -> Result<Plan> {
+    let mut plan = Plan::new("install", Agent::Codex, opts);
     let path = codex_config_path(opts);
     let mut doc = read_toml(&path)?;
     let before = doc.to_string();
@@ -701,41 +904,38 @@ fn install_codex(opts: &Options) -> Result<()> {
 
     let after = doc.to_string();
     if after == before {
-        println!("codex: {} already up to date", path.display());
-    } else {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, after)?;
-        println!(
-            "codex: wrote [mcp_servers.farhand] and FarHand's hooks to {}",
-            path.display()
-        );
-        println!(
-            "codex: Codex runs a new or changed hook only after you trust it: start Codex, \
-             open /hooks and trust FarHand's PreToolUse and SessionStart hooks"
-        );
+        plan.notes
+            .push(format!("{} is already up to date", path.display()));
+        return Ok(plan);
     }
-    match opts.scope {
-        Scope::Project => println!(
-            "codex: local shell off and sandbox read-only for this project; Codex loads \
-             .codex/config.toml only after you trust the project"
-        ),
-        Scope::User => println!(
-            "codex: once trusted, the hook refuses {} wherever FarHand is active (it needs \
-             Codex 0.164 or later; on older versions use --scope project)",
+    plan.write(path, after, None)?;
+    plan.next.push(
+        "Codex runs a new or changed hook only after you trust it: start Codex, open /hooks \
+         and trust FarHand's PreToolUse and SessionStart hooks"
+            .into(),
+    );
+    plan.next.push(match opts.scope {
+        Scope::Project => "local shell off and sandbox read-only for this project; Codex loads \
+                           .codex/config.toml only after you trust the project"
+            .into(),
+        Scope::User => format!(
+            "once trusted, the hook refuses {} wherever FarHand is active (it needs Codex \
+             0.164 or later; on older versions use --scope project)",
             CODEX_LOCAL_TOOLS.join(", ")
         ),
-    }
-    println!("codex: [approval] was translated now; rerun install after changing it");
-    Ok(())
+    });
+    plan.next
+        .push("[approval] was translated now; rerun install after changing it".into());
+    Ok(plan)
 }
 
-fn uninstall_codex(opts: &Options) -> Result<()> {
+fn plan_uninstall_codex(opts: &Options) -> Result<Plan> {
+    let mut plan = Plan::new("uninstall", Agent::Codex, opts);
     let path = codex_config_path(opts);
     if !path.exists() {
-        println!("codex: nothing installed");
-        return Ok(());
+        plan.notes
+            .push(format!("{} does not exist", path.display()));
+        return Ok(plan);
     }
     let mut doc = read_toml(&path)?;
     let before = doc.to_string();
@@ -767,13 +967,13 @@ fn uninstall_codex(opts: &Options) -> Result<()> {
         }
     }
     let after = doc.to_string();
-    if after != before {
-        std::fs::write(&path, after)?;
-        println!("codex: removed FarHand's entries from {}", path.display());
+    if after == before {
+        plan.notes
+            .push(format!("nothing of FarHand's is in {}", path.display()));
     } else {
-        println!("codex: nothing installed");
+        plan.write(path, after, None)?;
     }
-    Ok(())
+    Ok(plan)
 }
 
 fn status_codex(opts: &Options) -> Result<Vec<String>> {
@@ -967,9 +1167,72 @@ mod tests {
     fn opts() -> Options {
         Options {
             scope: Scope::Project,
+            confirm: Confirm::Ask,
             config: None,
             project: PathBuf::from("/tmp/p"),
         }
+    }
+
+    #[test]
+    fn a_plan_shows_each_change_before_making_it() {
+        let d = tempfile::tempdir().unwrap();
+        let existing = d.path().join("settings.json");
+        std::fs::write(&existing, "{\n  \"model\": \"opus\"\n}\n").unwrap();
+        let same = d.path().join("same.json");
+        std::fs::write(&same, "{}\n").unwrap();
+
+        let mut plan = Plan::new("install", Agent::ClaudeCode, &opts());
+        let after = "{\n  \"model\": \"opus\",\n  \"hooks\": {}\n}\n".to_string();
+        assert!(plan.write(existing.clone(), after.clone(), None).unwrap());
+        assert!(!plan.write(same.clone(), "{}\n".into(), None).unwrap());
+        plan.write(d.path().join("new.ts"), "x\n".into(), Some("a plugin"))
+            .unwrap();
+        plan.changes.push(Change::RunClaude {
+            args: vec!["mcp".into(), "add".into(), "a b".into()],
+        });
+        let shown = plan.render();
+        assert!(shown.starts_with("farhand install claude-code (project scope) will make"));
+        assert!(shown.contains(&format!("modify {}", existing.display())));
+        assert!(shown.contains("+  \"hooks\": {}"), "{shown}");
+        assert!(shown.contains("-  \"model\": \"opus\"\n"), "{shown}");
+        assert!(shown.contains("create ") && shown.contains("    a plugin"));
+        assert!(shown.contains("run: claude mcp add 'a b'"));
+        assert!(shown.contains(&format!("({} is already up to date)", same.display())));
+
+        // A dry run shows the plan and leaves every file as it was.
+        let dry = Options {
+            confirm: Confirm::DryRun,
+            ..opts()
+        };
+        let files_only = Plan {
+            changes: plan
+                .changes
+                .into_iter()
+                .filter(|c| !matches!(c, Change::RunClaude { .. }))
+                .collect(),
+            ..Plan::new("install", Agent::ClaudeCode, &dry)
+        };
+        carry_out(&files_only, &dry).unwrap();
+        assert!(!std::fs::read_to_string(&existing)
+            .unwrap()
+            .contains("hooks"));
+        assert!(!d.path().join("new.ts").exists());
+
+        let yes = Options {
+            confirm: Confirm::Yes,
+            ..opts()
+        };
+        carry_out(&files_only, &yes).unwrap();
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), after);
+        assert!(d.path().join("new.ts").exists());
+    }
+
+    #[test]
+    fn an_empty_plan_needs_no_confirmation() {
+        let plan = Plan::new("uninstall", Agent::Codex, &opts());
+        assert!(plan.render().contains("nothing to change"));
+        // Ask without a terminal would refuse; with nothing to do it never asks.
+        carry_out(&plan, &opts()).unwrap();
     }
 
     #[test]

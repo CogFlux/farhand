@@ -175,10 +175,19 @@ One command per agent. Each one writes exactly what that agent needs, is
 idempotent, and has a matching `uninstall`. `farhand status` shows where
 things stand.
 
+`install` and `uninstall` change nothing until you agree. They first print
+the plan: for each file, whether it is created, modified or deleted, with a
+diff of the change (the OpenCode plugin, FarHand's own file, is described
+instead), and for Claude Code at user scope the `claude mcp` command they
+would run. Then they ask `Apply these changes? [y/N]`. `--dry-run` prints the
+plan and stops; `--yes` applies it without asking. Without a terminal (a
+script, CI) they refuse unless `--yes` is given.
+
 ```
 farhand install opencode
 farhand install claude-code [--scope user|project]
-farhand install codex
+farhand install codex [--scope user|project]
+farhand install codex --dry-run       # show what would change, change nothing
 farhand status
 ```
 

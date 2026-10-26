@@ -176,7 +176,10 @@ your Docker login, so no SSH key is involved; get files in and out with
 
 `farhand install <agent>` does the wiring for `opencode`, `claude-code` and
 `codex` (`--scope user|project`); `farhand uninstall` reverses it and
-`farhand status` reports it. By default only directories that carry a
+`farhand status` reports it. Both first show every change they would make —
+a diff for each file, the command line for each agent CLI call — and ask
+before making it; `--dry-run` only shows, `--yes` skips the question (and is
+required where there is no terminal to ask on). By default only directories that carry a
 `.farhand.toml` go remote (`activation = "project"`); everywhere else the
 agent keeps its local tools. `activation = "always"` in the global config
 makes every session remote. What each agent gets is in `docs/USAGE.md`.

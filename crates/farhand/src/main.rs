@@ -6,8 +6,8 @@
 //! farhand check [--config PATH] [-v]          connect once and show the setup; -v adds the model's instructions
 //! farhand validate [--config PATH] [--cwd DIR] [--json]   parse the config only; no network
 //! farhand init                                print a configuration template
-//! farhand install <agent> [--scope user|project] [--config PATH]
-//! farhand uninstall <agent> [--scope user|project]
+//! farhand install <agent> [--scope user|project] [--config PATH] [--yes|--dry-run]
+//! farhand uninstall <agent> [--scope user|project] [--yes|--dry-run]
 //! farhand status [--scope user|project]
 //! farhand hook claude-code [--config PATH]    Claude Code PreToolUse hook (stdin JSON)
 //! farhand hook codex [--config PATH]          Codex PreToolUse / SessionStart hook (stdin JSON)
@@ -31,8 +31,9 @@ fn usage() -> ! {
     eprintln!(
         "usage:\n  farhand serve [--config PATH]\n  farhand check [--config PATH] [-v]\n  \
          farhand validate [--config PATH] [--cwd DIR] [--json]\n  farhand init\n  \
-         farhand install <opencode|claude-code|codex> [--scope user|project] [--config PATH]\n  \
-         farhand uninstall <opencode|claude-code|codex> [--scope user|project]\n  \
+         farhand install <opencode|claude-code|codex> [--scope user|project] [--config PATH] \
+         [--yes|--dry-run]\n  \
+         farhand uninstall <opencode|claude-code|codex> [--scope user|project] [--yes|--dry-run]\n  \
          farhand status [--scope user|project]\n  \
          farhand hook <claude-code|codex> [--config PATH]\n  farhand --version"
     );
@@ -47,6 +48,7 @@ struct Args {
     json: bool,
     verbose: bool,
     scope: install::Scope,
+    confirm: install::Confirm,
 }
 
 fn parse_args() -> Args {
@@ -62,12 +64,15 @@ fn parse_args() -> Args {
     let mut json = false;
     let mut verbose = false;
     let mut scope = install::Scope::User;
+    let mut confirm = install::Confirm::Ask;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" | "-c" => config = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--cwd" => cwd = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--json" => json = true,
             "-v" | "--verbose" => verbose = true,
+            "-y" | "--yes" => confirm = install::Confirm::Yes,
+            "--dry-run" => confirm = install::Confirm::DryRun,
             "--scope" => {
                 scope = match it.next().as_deref() {
                     Some("user") => install::Scope::User,
@@ -88,6 +93,7 @@ fn parse_args() -> Args {
         json,
         verbose,
         scope,
+        confirm,
     }
 }
 
@@ -107,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let install_opts = || -> anyhow::Result<install::Options> {
         Ok(install::Options {
             scope: args.scope,
+            confirm: args.confirm,
             config: match &args.config {
                 Some(c) => Some(std::fs::canonicalize(c)?),
                 None => None,
