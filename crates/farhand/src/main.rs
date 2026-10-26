@@ -10,6 +10,7 @@
 //! farhand uninstall <agent> [--scope user|project]
 //! farhand status [--scope user|project]
 //! farhand hook claude-code [--config PATH]    Claude Code PreToolUse hook (stdin JSON)
+//! farhand hook codex [--config PATH]          Codex PreToolUse / SessionStart hook (stdin JSON)
 //! farhand --version                           print the version
 //! ```
 //!
@@ -33,7 +34,7 @@ fn usage() -> ! {
          farhand install <opencode|claude-code|codex> [--scope user|project] [--config PATH]\n  \
          farhand uninstall <opencode|claude-code|codex> [--scope user|project]\n  \
          farhand status [--scope user|project]\n  \
-         farhand hook claude-code [--config PATH]\n  farhand --version"
+         farhand hook <claude-code|codex> [--config PATH]\n  farhand --version"
     );
     std::process::exit(2);
 }
@@ -125,7 +126,8 @@ async fn main() -> anyhow::Result<()> {
         }
         "status" => install::status(&install_opts()?),
         "hook" => match args.target.as_deref() {
-            Some("claude-code") | Some("claude") => hook::run(args.config.as_deref()),
+            Some("claude-code") | Some("claude") => hook::run_claude(args.config.as_deref()),
+            Some("codex") => hook::run_codex(args.config.as_deref()),
             _ => usage(),
         },
         "init" => {

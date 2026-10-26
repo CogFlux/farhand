@@ -1,5 +1,6 @@
 //! `farhand hook claude-code` — the PreToolUse hook Claude Code runs before
 //! every tool call once `farhand install claude-code` has wired it in.
+//! `farhand hook codex` is Codex's counterpart; see [`codex_respond`].
 //!
 //! Two jobs, same as the OpenCode plugin's call-time fence:
 //! - a local tool (`Bash`, `Edit`, `Read`, ...) is denied with a message
@@ -141,13 +142,117 @@ pub fn respond(
     }
 }
 
-pub fn run(explicit_config: Option<&Path>) -> anyhow::Result<()> {
+pub fn run_claude(explicit_config: Option<&Path>) -> anyhow::Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let project_dir = std::env::var_os("CLAUDE_PROJECT_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from);
     if let Some(out) = respond(&input, explicit_config, project_dir.as_deref()) {
+        println!("{out}");
+    }
+    Ok(())
+}
+
+/// Codex's tools that touch the local machine, by the names its hooks
+/// see: `Bash` is `exec_command` (and the shell tool), `apply_patch` writes
+/// files, `view_image` reads a local image into the conversation.
+pub const CODEX_LOCAL_TOOLS: &[&str] = &["Bash", "apply_patch", "view_image"];
+
+#[derive(Deserialize)]
+struct CodexHookInput {
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    hook_event_name: String,
+    #[serde(default)]
+    tool_name: String,
+}
+
+fn codex_replacement(tool: &str) -> &'static str {
+    match tool {
+        "Bash" => "FarHand's remote_shell",
+        "apply_patch" => "FarHand's remote_edit or remote_write",
+        _ => "FarHand's remote tools (download a file to look at it locally)",
+    }
+}
+
+fn codex_session_context(text: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": text,
+        }
+    })
+    .to_string()
+}
+
+/// The hook Codex runs for `PreToolUse` and `SessionStart` once `farhand
+/// install codex` has wired it in. Codex has no `ask` for hooks and lets a
+/// call through when its hook fails, so this hook only ever denies: a local
+/// tool wherever FarHand is active, and wherever the config does not load.
+/// At session start it tells the model, where FarHand is active, that the
+/// work is remote. `[approval]` stays with Codex's per-tool approval modes.
+pub fn codex_respond(input_json: &str, explicit_config: Option<&Path>) -> Option<String> {
+    let input: CodexHookInput = serde_json::from_str(input_json).ok()?;
+    let local_tool = match input.hook_event_name.as_str() {
+        "PreToolUse" if CODEX_LOCAL_TOOLS.contains(&input.tool_name.as_str()) => {
+            Some(input.tool_name.as_str())
+        }
+        "SessionStart" => None,
+        _ => return None,
+    };
+
+    let config = match Config::load_in(input.cwd.as_deref(), explicit_config) {
+        Ok(l) if !l.active() => return None,
+        Ok(l) => l.config,
+        Err(farhand_core::Error::NoConfig) => return None,
+        Err(e) => {
+            return Some(match local_tool {
+                Some(tool) => decision(
+                    "deny",
+                    &format!(
+                        "FarHand: cannot read its config ({e}); the local tool {tool} stays \
+                         off until it is fixed (run `farhand check`)"
+                    ),
+                ),
+                None => codex_session_context(&format!(
+                    "FarHand is configured for this directory but its config does not load \
+                     ({e}). Do no file or shell work; tell the user to fix it (`farhand \
+                     check`)."
+                )),
+            })
+        }
+    };
+
+    Some(match local_tool {
+        Some(tool) => decision(
+            "deny",
+            &format!(
+                "FarHand: the local tool {tool} is disabled in this session; everything runs \
+                 on the remote host. Use {} instead.",
+                codex_replacement(tool)
+            ),
+        ),
+        None => codex_session_context(&format!(
+            "FarHand is active: this session works on the REMOTE host `{host}` in `{workdir}` \
+             over SSH, not on this machine. The working directory Codex reports is the local \
+             one; \"here\", \"this project\" and every relative path mean the remote workdir. \
+             Use FarHand's remote_* tools for every command and file operation; the local \
+             shell, apply_patch and view_image are refused. Use local_ls / local_read only when \
+             the user asks about their local folders, and upload / download to move files. A \
+             service started on the remote is not at localhost for the user: call remote_info \
+             for its address.",
+            host = config.remote.host,
+            workdir = config.remote.workdir,
+        )),
+    })
+}
+
+pub fn run_codex(explicit_config: Option<&Path>) -> anyhow::Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    if let Some(out) = codex_respond(&input, explicit_config) {
         println!("{out}");
     }
     Ok(())
@@ -291,6 +396,50 @@ mod tests {
         }
         assert!(r.is_none());
         assert!(r2.is_none());
+    }
+
+    fn codex_call(cwd: &Path, event: &str, tool: &str) -> Option<serde_json::Value> {
+        let input = serde_json::json!({
+            "cwd": cwd, "hook_event_name": event, "tool_name": tool, "tool_input": {}
+        });
+        codex_respond(&input.to_string(), None).map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    #[test]
+    fn codex_local_tools_are_denied_and_others_left_alone() {
+        let d = cfg_dir("mode='ask'");
+        for t in CODEX_LOCAL_TOOLS {
+            assert_eq!(kind(&codex_call(d.path(), "PreToolUse", t)), "deny", "{t}");
+        }
+        // Codex has no `ask`: FarHand's own tools get no decision at all.
+        assert!(codex_call(d.path(), "PreToolUse", "mcp__farhand__remote_shell").is_none());
+        assert!(codex_call(d.path(), "PostToolUse", "Bash").is_none());
+        let sub = d.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(kind(&codex_call(&sub, "PreToolUse", "Bash")), "deny");
+    }
+
+    #[test]
+    fn codex_session_start_says_the_work_is_remote() {
+        let d = cfg_dir("mode='ask'");
+        let v = codex_call(d.path(), "SessionStart", "").unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let text = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("REMOTE host `h`"), "{text}");
+    }
+
+    #[test]
+    fn codex_broken_config_denies_instead_of_asking() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".farhand.toml"), "nonsense = [").unwrap();
+        assert_eq!(kind(&codex_call(d.path(), "PreToolUse", "Bash")), "deny");
+        let v = codex_call(d.path(), "SessionStart", "").unwrap();
+        assert!(v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("does not load"));
     }
 
     #[test]

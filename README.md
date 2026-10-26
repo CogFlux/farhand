@@ -372,9 +372,13 @@ through. Tested at project scope.
 
 ## Codex
 
-`farhand install codex --scope project` registers the server, turns Codex's
-shell tool off, sets the sandbox read-only and translates `[approval]` into
-per-tool `approval_mode`. User scope registers the server only.
+`farhand install codex` registers the server, translates `[approval]` into
+per-tool `approval_mode`, and adds a `PreToolUse` hook (`farhand hook
+codex`) that refuses Codex's local shell, `apply_patch` and `view_image`
+wherever FarHand is active, plus a `SessionStart` hook that tells the model
+it works remotely. Codex runs the hooks only once you trust them in its
+`/hooks` view. `--scope project` also turns Codex's shell tool off and sets
+the sandbox read-only, which holds even if a hook fails.
 
 ## Roadmap
 

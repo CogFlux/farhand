@@ -197,9 +197,10 @@ agent to one remote without a global `activation = "always"`. Without it
 |---|---|---|---|
 | registers the MCP server | plugin | `claude mcp add` (user) / `.mcp.json` (project) | `[mcp_servers.farhand]` |
 | closes local tools | plugin `config` hook | `permissions.deny` (project scope) | `features.shell_tool = false` + `sandbox_mode = "read-only"` (project scope) |
-| second fence | plugin `tool.execute.before` | `PreToolUse` hook → `farhand hook claude-code` | none |
+| second fence | plugin `tool.execute.before` | `PreToolUse` hook → `farhand hook claude-code` | `PreToolUse` hook → `farhand hook codex` (deny only; trust it in `/hooks`) |
 | `[approval]` | translated at startup | answered by the hook per call | `tools.<t>.approval_mode`, translated at install |
-| honours `activation` | yes | yes (hook) | serve offers no tools when inactive |
+| honours `activation` | yes | yes (hook) | yes (hook); serve offers no tools when inactive |
+| tells the model it is remote | system prompt | MCP instructions | `SessionStart` hook + MCP instructions |
 | tools appear as | `farhand_remote_shell` | `mcp__farhand__remote_shell` | `farhand.remote_shell` |
 
 **User scope vs project scope.** User scope (`--scope user`, the default)
@@ -288,8 +289,8 @@ nothing is added to `CLAUDE.md`.
 ### Codex CLI
 
 ```
-farhand install codex                    # user: registers the server, Codex keeps its shell
-farhand install codex --scope project    # this project: local shell off, sandbox read-only
+farhand install codex                    # user: server + hooks that refuse local tools where FarHand is active
+farhand install codex --scope project    # this project: also local shell off, sandbox read-only
 ```
 
 Codex (2026) can switch its own shell tool off (`features.shell_tool = false`,
@@ -298,10 +299,24 @@ Codex (2026) can switch its own shell tool off (`features.shell_tool = false`,
 (`mcp_servers.farhand.tools.<tool>.approval_mode = "auto" | "prompt"`), so a
 project-scope install is a real FarHand session: the model has no local
 shell, cannot write locally, and `[approval]` decides which FarHand tools
-prompt. Two differences from the other agents: Codex has no per-call hook,
-so `[approval]` is translated when you run `install` (rerun it after changing
-it), and Codex loads a project's `.codex/config.toml` only once you have
-trusted that project. `activation` still applies: in a directory without
+prompt.
+
+Both scopes also add two hooks that run `farhand hook codex` (Codex 0.164
+or later). `PreToolUse` refuses Codex's local tools — `Bash` (its shell,
+`exec_command`), `apply_patch` and `view_image` — wherever FarHand is
+active, and also wherever its config does not load; `SessionStart` tells the
+model that the session is remote, since Codex itself reports the local
+working directory. With them, a user-scope install is enough: directories
+with a `.farhand.toml` lose the local tools, the rest keep them.
+
+Three differences from the other agents. Codex runs a hook only after you
+have trusted it: after `install`, start Codex, open `/hooks` and trust
+FarHand's two hooks (again whenever `install` changes them). Until then the
+hooks do nothing. Codex hooks cannot ask, so `[approval]` is translated
+into per-tool approval modes when you run `install` (rerun it after
+changing it). And Codex lets a call through when a hook fails, so the
+project-scope settings stay the stronger fence; Codex also loads a
+project's `.codex/config.toml` only once you have trusted that project. `activation` still applies: in a directory without
 `.farhand.toml`, the server lists no tools.
 
 If you would rather run Codex itself on the server (`ssh` + `tmux`), that
