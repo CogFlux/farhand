@@ -305,14 +305,21 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => return Err(e.into()),
             };
             let active = server.is_active();
-            // Connect eagerly so a bad host fails loudly at startup instead
-            // of on the model's first call; a failure here is logged and
-            // retried lazily. An inactive server offers no tools and does
-            // not touch the network.
+            // Connect early so the first call does not wait for ssh and a
+            // bad host shows in the log at startup; a failure here is
+            // logged and retried lazily. It runs beside the MCP handshake,
+            // not before it: agents list tools once, early (Codex at turn
+            // start), and a waking sandbox can take seconds to answer ssh.
+            // A call that arrives meanwhile waits for the same connection.
+            // An inactive server offers no tools and does not touch the
+            // network.
             if active {
-                if let Err(e) = server.preflight().await {
-                    tracing::warn!("preflight connection failed: {e}");
-                }
+                let early = server.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = early.preflight().await {
+                        tracing::warn!("preflight connection failed: {e}");
+                    }
+                });
             }
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
