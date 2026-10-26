@@ -133,8 +133,11 @@ and memory stays flat whatever its size; the default cap of 1 GiB per
 transfer is `max_transfer_bytes` under `[limits]`.
 
 Config is found in this order: `--config PATH`, `$FARHAND_CONFIG`,
-`./.farhand.toml`, `~/.config/farhand/config.toml`. The per-project
-`.farhand.toml` is the normal one: it is what makes a directory remote. The
+`.farhand.toml` in the current directory or the nearest folder above it,
+`~/.config/farhand/config.toml`. The per-project `.farhand.toml` is the
+normal one: it is what makes a directory, and every folder and worktree
+below it, remote. The search upwards stops short of the home directory and
+`/`, so a stray file there claims nothing. The
 global file is optional and serves two purposes: `activation = "always"`
 turns every directory on the machine remote using its `[remote]`, and it is
 a convenient target for `--config`. Without any config at all, FarHand is
@@ -185,10 +188,11 @@ makes every session remote. What each agent gets is in `docs/USAGE.md`.
 development). The one file carries both plugin APIs, so it works with
 OpenCode 1.18.29+ and OpenCode 2 alike and survives an upgrade between them.
 The plugin registers the MCP server, removes OpenCode's local tools
-(`bash`/`shell`, `read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`,
-the LSP tools, and in OpenCode 2 the `browser_*` tools and Code Mode's
-`execute`, since a local browser and `execute`'s `fetch` can both open
-`file://` URLs), refuses them again at call time as a second fence, and tells the model in the system prompt that it is working
+(`bash`/`shell`, `read`, `write`, `edit`, `patch`, `apply_patch`, `glob`,
+`grep`, `list`, the LSP tools, and in OpenCode 2 the `browser_*` tools, the
+experimental `tui_*` terminal tools and Code Mode's `execute`, since a local
+browser and `execute`'s `fetch` can both open `file://` URLs; OpenCode 1
+gets them as `deny` permissions), refuses them again at call time as a second fence, and tells the model in the system prompt that it is working
 remotely.
 
 Approval is FarHand's knob, not the agent's: `[approval] mode = "ask"`
@@ -359,10 +363,12 @@ packages/npm/farhand  the npm wrapper (`npx farhand`), fetches the release binar
 ## Claude Code
 
 `farhand install claude-code` registers the server and adds a `PreToolUse`
-hook (`farhand hook claude-code`) that refuses local tools wherever FarHand
+hook (`farhand hook claude-code`) that refuses local tools (`Bash`,
+`PowerShell`, `Monitor`, the file tools, `EnterWorktree`) wherever FarHand
 is active and answers `mcp__farhand__*` calls from `[approval]` on every
-call; project scope also writes a static `permissions.deny`. Tested at
-project scope.
+call; project scope also writes a static `permissions.deny`. The hook is
+set to block the call if it fails or times out, rather than let it
+through. Tested at project scope.
 
 ## Codex
 

@@ -4,7 +4,8 @@
 //! Resolution order (first hit wins):
 //! 1. an explicit path (`--config`),
 //! 2. `$FARHAND_CONFIG`,
-//! 3. `.farhand.toml` in the working directory,
+//! 3. `.farhand.toml` in the working directory or the nearest folder above
+//!    it, short of the home directory and the filesystem root,
 //! 4. `~/.config/farhand/config.toml`.
 //!
 //! Whether FarHand is *active* in a directory — takes the agent's local
@@ -502,11 +503,11 @@ impl Config {
         if let Some(p) = std::env::var_os("FARHAND_CONFIG") {
             return Ok((PathBuf::from(p), Source::Env));
         }
-        let local = match cwd {
-            Some(d) => d.join(".farhand.toml"),
-            None => PathBuf::from(".farhand.toml"),
+        let start = match cwd {
+            Some(d) => std::path::absolute(d)?,
+            None => std::env::current_dir()?,
         };
-        if local.is_file() {
+        if let Some(local) = find_project_file(&start, dirs::home_dir().as_deref()) {
             return Ok((local, Source::Project));
         }
         let p = Self::global_path();
@@ -644,6 +645,23 @@ impl Config {
     }
 }
 
+/// The `.farhand.toml` in `start` or the nearest folder above it, so a
+/// session started in a subfolder or a worktree of the project is still
+/// the project's. Folders above `start` stop short of `home` and the
+/// filesystem root: a stray file there would claim every folder below it.
+fn find_project_file(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let here = start.join(".farhand.toml");
+    if here.is_file() {
+        return Some(here);
+    }
+    start
+        .ancestors()
+        .skip(1)
+        .take_while(|d| d.parent().is_some() && Some(*d) != home)
+        .map(|d| d.join(".farhand.toml"))
+        .find(|f| f.is_file())
+}
+
 /// `$VAR` if set, else `~/<fallback>`. The XDG layout is used on every
 /// platform so the documented paths (`~/.config/farhand`,
 /// `~/.local/share/farhand`) are the real ones on macOS too.
@@ -762,6 +780,34 @@ mod tests {
         assert_eq!(cfg.remote.shell, vec!["bash", "-lc"]);
         assert_eq!(cfg.local.allowed_dirs, vec![PathBuf::from("/proj")]);
         assert!(Config::parse(Config::example()).is_err());
+    }
+
+    #[test]
+    fn project_file_is_found_above_the_working_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let proj = home.path().join("proj");
+        let deep = proj.join(".claude/worktrees/w1/src");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = proj.join(".farhand.toml");
+        std::fs::write(&file, "").unwrap();
+        let h = Some(home.path());
+        assert_eq!(find_project_file(&deep, h), Some(file.clone()));
+        assert_eq!(find_project_file(&proj, h), Some(file));
+        // The nearest file wins.
+        let inner = deep.join(".farhand.toml");
+        std::fs::write(&inner, "").unwrap();
+        assert_eq!(find_project_file(&deep, h), Some(inner));
+    }
+
+    #[test]
+    fn project_file_search_stops_below_home() {
+        let home = tempfile::tempdir().unwrap();
+        let sub = home.path().join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(home.path().join(".farhand.toml"), "").unwrap();
+        assert_eq!(find_project_file(&sub, Some(home.path())), None);
+        // A session started in the home folder itself still finds it.
+        assert!(find_project_file(home.path(), Some(home.path())).is_some());
     }
 
     #[test]

@@ -220,8 +220,11 @@ older FarHand plugin does not load in OpenCode 2, and OpenCode then starts
 an ordinary local session with only a warning in its log.
 
 The plugin registers the MCP server, removes `bash`/`shell`, `read`,
-`write`, `edit`, `multiedit`, `patch`, `glob`, `grep`, `list`, the LSP
-tools and (OpenCode 2) the `browser_*` tools, turns Code Mode off for every
+`write`, `edit`, `multiedit`, `patch`, `apply_patch` (what GPT models get
+instead of `edit`), `glob`, `grep`, `list`, the LSP tools and (OpenCode 2)
+the `browser_*` tools and the experimental `tui_*` terminal tools (OpenCode
+1 cannot remove tools from a plugin, so there they are `deny` permissions,
+which outrank any rule of yours for them), turns Code Mode off for every
 MCP server (its `execute` sandbox can `fetch` `file://` URLs, so `execute`
 is refused as well; your other MCP tools are offered directly instead),
 refuses all of these again at call time, translates `[approval]` into OpenCode's permissions, and tells the
@@ -252,8 +255,11 @@ farhand install claude-code --scope project    # this project only
 
 User scope runs `claude mcp add --scope user farhand -- <farhand> serve` and
 adds one `PreToolUse` hook group to `~/.claude/settings.json` that runs
-`farhand hook claude-code` for `Bash`, `Edit`, `Write`, `MultiEdit`,
-`NotebookEdit`, `Read`, `Glob`, `Grep` and `mcp__farhand__.*`. Project scope
+`farhand hook claude-code` for `Bash`, `PowerShell`, `Monitor`, `Edit`,
+`Write`, `MultiEdit`, `NotebookEdit`, `Read`, `Glob`, `Grep`,
+`EnterWorktree` and `mcp__farhand__.*`, with `onFailure = "block"`: a hook
+that errors or times out (a binary moved by an upgrade, say) refuses the
+call instead of letting it through. Project scope
 writes `.mcp.json` and `.claude/settings.json` in the current directory, with
 the same hook plus a static `permissions.deny` for those local tools.
 `farhand hook claude-code` is the subcommand that hook entry runs; there is
@@ -262,7 +268,9 @@ nothing to install separately.
 The hook denies a local tool with a message naming the FarHand replacement,
 and answers `mcp__farhand__<tool>` from the `[approval]` section of the
 FarHand config that applies to the hook's working directory (a
-`.farhand.toml` there, else the usual resolution): `allow` for `auto`, `ask`
+`.farhand.toml` there or in the nearest folder above it, so subfolders and
+worktrees inside the project count; else the one in `$CLAUDE_PROJECT_DIR`,
+where the session started; else the usual resolution): `allow` for `auto`, `ask`
 for `ask`; `strict` makes reads ask too. The config is read on every call, so
 changes take effect without reinstalling. `claude -p` (non-interactive)
 cannot answer a prompt, so use `mode = "auto"` there, in the global config

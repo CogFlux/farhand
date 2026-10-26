@@ -360,10 +360,17 @@ fn apply_claude_settings(settings: &mut Value, static_deny: bool, opts: &Options
         }
     }
 
-    // hooks.PreToolUse: one FarHand group
+    // hooks.PreToolUse: one FarHand group. Claude Code lets a call through
+    // when its hook errors or times out; `onFailure: block` refuses it
+    // instead, so a missing binary or a slow config cannot open the fence.
     let wanted = json!({
         "matcher": hook_matcher(),
-        "hooks": [{ "type": "command", "command": hook_command(opts)?, "timeout": 10 }],
+        "hooks": [{
+            "type": "command",
+            "command": hook_command(opts)?,
+            "timeout": 10,
+            "onFailure": "block",
+        }],
     });
     let hooks = settings
         .as_object_mut()
@@ -837,6 +844,11 @@ mod tests {
         assert!(apply_claude_settings(&mut s, false, &opts()).unwrap());
         assert!(s.get("permissions").is_none());
         assert!(s["hooks"]["PreToolUse"][0].is_object());
+        // A hook that fails must refuse the call, not wave it through.
+        assert_eq!(
+            s["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"],
+            "block"
+        );
     }
 
     #[test]

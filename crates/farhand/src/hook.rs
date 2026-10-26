@@ -9,10 +9,12 @@
 //!   `allow` for `auto`, `ask` for `ask`. Anything else gets no decision.
 //!
 //! The config is read on every call, so changing `[approval]` takes effect
-//! immediately, without reinstalling. When the config that applies is not
-//! active for the hook's `cwd` (global `activation = "project"` and no
-//! `.farhand.toml` there), the hook makes no decision at all and the
-//! session stays local.
+//! immediately, without reinstalling. The hook's `cwd` follows the session
+//! into subfolders and worktrees, so the project file is looked for above
+//! it too, and failing that in `$CLAUDE_PROJECT_DIR`, where the session
+//! started. When the config that applies is active for neither (global
+//! `activation = "project"` and no `.farhand.toml`), the hook makes no
+//! decision at all and the session stays local.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,9 +23,14 @@ use farhand_core::config::ApprovalMode;
 use farhand_core::Config;
 use serde::Deserialize;
 
-/// Claude Code's tools that touch the local machine.
+/// Claude Code's tools that touch the local machine. `Monitor` runs a
+/// local command and streams its output, `PowerShell` is the shell tool on
+/// Windows, and `EnterWorktree` creates a local git worktree and moves the
+/// session into it.
 pub const CLAUDE_LOCAL_TOOLS: &[&str] = &[
     "Bash",
+    "PowerShell",
+    "Monitor",
     "Edit",
     "Write",
     "MultiEdit",
@@ -31,6 +38,7 @@ pub const CLAUDE_LOCAL_TOOLS: &[&str] = &[
     "Read",
     "Glob",
     "Grep",
+    "EnterWorktree",
 ];
 
 pub const MCP_PREFIX: &str = "mcp__farhand__";
@@ -57,7 +65,8 @@ fn decision(kind: &str, reason: &str) -> String {
 /// Which FarHand tool replaces a given Claude Code local tool.
 fn replacement(tool: &str) -> &'static str {
     match tool {
-        "Bash" => "mcp__farhand__remote_shell",
+        "Bash" | "PowerShell" => "mcp__farhand__remote_shell",
+        "Monitor" => "mcp__farhand__remote_spawn",
         "Edit" | "MultiEdit" | "NotebookEdit" => "mcp__farhand__remote_edit",
         "Write" => "mcp__farhand__remote_write",
         "Read" => "mcp__farhand__remote_read",
@@ -68,7 +77,13 @@ fn replacement(tool: &str) -> &'static str {
 }
 
 /// Compute the hook's stdout for one input. `None` means "no decision".
-pub fn respond(input_json: &str, explicit_config: Option<&Path>) -> Option<String> {
+/// `project_dir` is the session's starting folder, consulted when `cwd`
+/// finds no active config.
+pub fn respond(
+    input_json: &str,
+    explicit_config: Option<&Path>,
+    project_dir: Option<&Path>,
+) -> Option<String> {
     let input: HookInput = serde_json::from_str(input_json).ok()?;
     let tool = input.tool_name.as_str();
     let is_local = CLAUDE_LOCAL_TOOLS.contains(&tool);
@@ -77,7 +92,16 @@ pub fn respond(input_json: &str, explicit_config: Option<&Path>) -> Option<Strin
         return None;
     }
 
-    let loaded = Config::load_in(input.cwd.as_deref(), explicit_config);
+    let mut loaded = Config::load_in(input.cwd.as_deref(), explicit_config);
+    let found_nothing = match &loaded {
+        Ok(l) => !l.active(),
+        Err(e) => matches!(e, farhand_core::Error::NoConfig),
+    };
+    if found_nothing {
+        if let Some(dir) = project_dir {
+            loaded = Config::load_in(Some(dir), explicit_config);
+        }
+    }
     let config = match loaded {
         Ok(l) if !l.active() => return None,
         Ok(l) => l.config,
@@ -120,7 +144,10 @@ pub fn respond(input_json: &str, explicit_config: Option<&Path>) -> Option<Strin
 pub fn run(explicit_config: Option<&Path>) -> anyhow::Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
-    if let Some(out) = respond(&input, explicit_config) {
+    let project_dir = std::env::var_os("CLAUDE_PROJECT_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    if let Some(out) = respond(&input, explicit_config, project_dir.as_deref()) {
         println!("{out}");
     }
     Ok(())
@@ -142,7 +169,7 @@ mod tests {
 
     fn call(cwd: &Path, tool: &str) -> Option<serde_json::Value> {
         let input = serde_json::json!({ "cwd": cwd, "tool_name": tool, "tool_input": {} });
-        respond(&input.to_string(), None).map(|s| serde_json::from_str(&s).unwrap())
+        respond(&input.to_string(), None, None).map(|s| serde_json::from_str(&s).unwrap())
     }
 
     fn kind(v: &Option<serde_json::Value>) -> String {
@@ -167,6 +194,37 @@ mod tests {
     }
 
     #[test]
+    fn subfolders_and_worktrees_of_a_project_are_fenced() {
+        let d = cfg_dir("mode='ask'");
+        let worktree = d.path().join(".claude/worktrees/w1/src");
+        std::fs::create_dir_all(&worktree).unwrap();
+        assert_eq!(kind(&call(&worktree, "Bash")), "deny");
+        assert_eq!(kind(&call(&worktree, "Monitor")), "deny");
+    }
+
+    #[test]
+    fn project_dir_covers_a_worktree_outside_the_project() {
+        let proj = cfg_dir("mode='ask'");
+        let elsewhere = tempfile::tempdir().unwrap();
+        // Keep a real global config out of the picture.
+        let home = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", home.path());
+        let input = serde_json::json!({ "cwd": elsewhere.path(), "tool_name": "Write" });
+        let with = respond(&input.to_string(), None, Some(proj.path()));
+        let without = respond(&input.to_string(), None, None);
+        match prev {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        assert_eq!(
+            kind(&with.map(|s| serde_json::from_str(&s).unwrap())),
+            "deny"
+        );
+        assert!(without.is_none());
+    }
+
+    #[test]
     fn farhand_tools_follow_approval() {
         // `auto` for a mutating tool comes from a config the user chose,
         // never from a project file.
@@ -179,7 +237,8 @@ mod tests {
         .unwrap();
         let call_with = |tool: &str| {
             let input = serde_json::json!({ "cwd": d.path(), "tool_name": tool, "tool_input": {} });
-            respond(&input.to_string(), Some(&explicit)).map(|s| serde_json::from_str(&s).unwrap())
+            respond(&input.to_string(), Some(&explicit), None)
+                .map(|s| serde_json::from_str(&s).unwrap())
         };
         assert_eq!(kind(&call_with("mcp__farhand__remote_shell")), "ask");
         assert_eq!(kind(&call_with("mcp__farhand__remote_write")), "allow");

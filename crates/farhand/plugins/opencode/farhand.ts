@@ -34,7 +34,9 @@ import { join } from "node:path"
  * `bash` to `shell` and dropped `list`; its `browser_*` tools drive a local
  * browser, which can open `file://` URLs and read local files. V2's Code
  * Mode `execute` runs model-written JavaScript whose `fetch` reads
- * `file://` URLs too (verified on 2.0.14).
+ * `file://` URLs too (verified on 2.0.14). GPT models get `apply_patch`
+ * in place of `edit` and `write`. The experimental `tui_*` tools (2.1.4)
+ * type into the session's local terminal.
  */
 const LOCAL_TOOLS = new Set([
   "bash",
@@ -45,19 +47,29 @@ const LOCAL_TOOLS = new Set([
   "edit",
   "multiedit",
   "patch",
+  "apply_patch",
   "glob",
   "grep",
   "list",
   "ls",
 ])
-const LOCAL_PREFIXES = ["lsp", "browser_"]
+const LOCAL_PREFIXES = ["lsp", "browser_", "tui_"]
 
 function isLocalTool(id: string): boolean {
   return LOCAL_TOOLS.has(id) || LOCAL_PREFIXES.some((p) => id.startsWith(p))
 }
 
 function refusal(tool: string): string {
-  const remote: Record<string, string> = { bash: "remote_shell", shell: "remote_shell", list: "remote_ls", ls: "remote_ls", execute: "remote_shell" }
+  const remote: Record<string, string> = {
+    bash: "remote_shell",
+    shell: "remote_shell",
+    execute: "remote_shell",
+    list: "remote_ls",
+    ls: "remote_ls",
+    multiedit: "remote_edit",
+    patch: "remote_edit",
+    apply_patch: "remote_edit",
+  }
   const hint = remote[tool] ?? (LOCAL_TOOLS.has(tool) ? `remote_${tool}` : undefined)
   return (
     `FarHand: local tool "${tool}" is disabled in this session.` +
@@ -205,14 +217,22 @@ async function serverV1(input: any, options?: Record<string, unknown>) {
           },
         }
       }
-      const disabled = Object.fromEntries(
-        [...LOCAL_TOOLS, "lsp_diagnostics", "lsp_hover"].map((t) => [t, false]),
-      )
+      const disabled = Object.fromEntries([...LOCAL_TOOLS, "lsp"].map((t) => [t, false]))
       config.tools = { ...config.tools, ...disabled }
 
+      // OpenCode 1.x turns `tools` into permissions only while it loads
+      // the config, before this hook runs, so `tools` alone removes
+      // nothing: the local tools are denied in `permission` itself, with
+      // wildcard keys for the prefixed families. Each key is moved to the
+      // end, where it outranks any earlier rule the user wrote for it.
       // Any `farhand*` key the user has put in their own `permission`
       // config wins over the translated values.
-      const permission = (config.permission ?? {}) as Record<string, unknown>
+      const permission: Record<string, unknown> =
+        typeof config.permission === "string" ? { "*": config.permission } : { ...config.permission }
+      for (const key of [...LOCAL_TOOLS, ...LOCAL_PREFIXES.map((p) => `${p}*`)]) {
+        delete permission[key]
+        permission[key] = "deny"
+      }
       for (const [tool, mode] of Object.entries(s.approval)) {
         const key = `farhand_${tool}`
         if (key in permission) continue
