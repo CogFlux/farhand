@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "farhand"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "dirs",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "farhand-core"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
