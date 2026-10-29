@@ -84,7 +84,8 @@ That is all: a project is remote exactly when it has a `.farhand.toml`.
 There is no global configuration to write unless you want one (see
 Configure).
 
-See `docs/USAGE.md` for the step-by-step guide and per-agent configuration.
+See `docs/USAGE.md` for the step-by-step guide and per-agent configuration;
+`farhand -h` and `farhand <command> -h` summarise the commands and options.
 
 ## Update
 
@@ -138,10 +139,19 @@ Config is found in this order: `--config PATH`, `$FARHAND_CONFIG`,
 normal one: it is what makes a directory, and every folder and worktree
 below it, remote. The search upwards stops short of the home directory and
 `/`, so a stray file there claims nothing. The
-global file is optional and serves two purposes: `activation = "always"`
-turns every directory on the machine remote using its `[remote]`, and it is
-a convenient target for `--config`. Without any config at all, FarHand is
-simply inactive: the agent keeps its local tools and the server offers none.
+global file is optional. It is the ceiling every project file is held to
+(`[approval]`, local folders, the audit log) and the home of your own deny
+lists, and `activation = "always"` turns every directory on the machine
+remote using its `[remote]`; without that, `[remote]` may be left out. Without
+any config at all, FarHand is simply inactive: the agent keeps its local
+tools and the server offers none.
+
+Trust follows the file name. A file named `.farhand.toml` is a project file
+however it is reached (by directory, `--config` or `$FARHAND_CONFIG`) and can
+only tighten the global config. A file under any other name passed with
+`--config` or `$FARHAND_CONFIG` is your own choice and is trusted like the
+global config. `farhand validate --json` reports which as `source` and
+`trust`.
 
 ## Docker sandboxes
 
@@ -205,7 +215,9 @@ lets read-only tools run;
 `"auto"` prompts for nothing, with the audit log as the record; `"strict"`
 prompts for everything, reads included; `tools = { remote_write = "auto" }`
 overrides per tool. A project `.farhand.toml` can make this stricter but not
-looser than the global config; `auto` belongs in the global file. The
+looser than the global config: the global mode is a ceiling, not a default,
+so `auto` takes both the global file allowing it and the project asking for
+it. The
 plugin translates this into OpenCode's permission system at startup.
 
 Without the plugin, the same effect comes from `opencode.jsonc` (OpenCode 1
@@ -379,9 +391,11 @@ through. Tested at project scope.
 per-tool `approval_mode`, and adds a `PreToolUse` hook (`farhand hook
 codex`) that refuses Codex's local shell, `apply_patch` and `view_image`
 wherever FarHand is active, plus a `SessionStart` hook that tells the model
-it works remotely. Codex runs the hooks only once you trust them in its
-`/hooks` view. `--scope project` also turns Codex's shell tool off and sets
-the sandbox read-only, which holds even if a hook fails.
+it works remotely. Because the approval modes are written at install time,
+the same hook refuses a FarHand tool that the config in force sets to `ask`
+while Codex would run it without asking. Codex runs the hooks only once you
+trust them in its `/hooks` view. `--scope project` also turns Codex's shell
+tool off and sets the sandbox read-only, which holds even if a hook fails.
 
 ## Roadmap
 

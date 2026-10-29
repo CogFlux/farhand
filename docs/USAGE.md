@@ -100,8 +100,10 @@ Relative entries are resolved against the `.farhand.toml`, may not contain
 entry that does not exist yet is ignored, so create the folder first. A
 project file may only name its own folder or folders inside it;
 absolute and `~/...` entries (a shared `~/FarHand-Outbox`, say) go in the
-global config, which takes absolute paths only. `/`, the home directory and
-any folder above it are refused everywhere.
+global config, which takes absolute paths only. A file under another name
+passed with `--config` or `FARHAND_CONFIG` takes both: relative entries
+resolve against its folder. `/`, the home directory and any folder above it
+are refused everywhere.
 
 A `.farhand.toml` can arrive with a cloned repository, so it may only
 tighten the global config (or the defaults, without one): `[approval]` no
@@ -120,6 +122,14 @@ Other agents pass it with `farhand serve --config /path/to/.farhand.toml` or
 `FARHAND_CONFIG=...`. Keep `.farhand.toml` out of git (the repo's
 `.gitignore` already does).
 
+Trust goes by the file name, not by how the file was reached: anything
+named `.farhand.toml` is a project file, whether found by directory, passed
+with `--config` or set in `FARHAND_CONFIG`. The same content under another
+name (`--config ~/farhand/devbox.toml`) is trusted like the global config,
+so its `auto` and absolute folders hold. `farhand validate --json` says
+which: `"source"` is `explicit`, `env`, `project` or `global`, and
+`"trust"` is `project` (may only tighten) or `global`.
+
 ### The optional global config and `activation`
 
 A directory without `.farhand.toml` is an ordinary local session: the
@@ -134,9 +144,21 @@ activation = "always"    # every directory is remote, using [remote] below
 # activation = "project" # the default: only directories with a .farhand.toml
 ```
 
-It is also a convenient target for `farhand serve --config` or
-`FARHAND_CONFIG`. `farhand validate --cwd DIR` reports `active here` for any
-directory.
+It is also the ceiling for every project file and the home of your own
+`[guard]` lists and `audit.log_dir`. Used only for that, it needs no
+`[remote]`:
+
+```toml
+# ~/.config/farhand/config.toml
+[approval]
+mode = "auto"   # projects may go as far as auto; each still asks for it
+```
+
+`[remote]` is required with `activation = "always"` and in every other
+file. The global `[approval]` is a ceiling, not a default: a project file
+without its own `[approval]` asks as usual.
+
+`farhand validate --cwd DIR` reports `active here` for any directory.
 
 ## 4. Daily use
 
@@ -198,7 +220,8 @@ launchers do not matter.
 `--config PATH` pins that agent to one FarHand config regardless of
 directory: the path is baked into the server command, the Claude Code hook
 command and the OpenCode plugin, and an explicit config always counts as
-active. Use it when a project cannot carry a `.farhand.toml`, or to bind one
+active (a file named `.farhand.toml` is still held to the global config).
+Use it when a project cannot carry a `.farhand.toml`, or to bind one
 agent to one remote without a global `activation = "always"`. Without it
 (the normal case) the config is resolved per directory.
 
@@ -283,8 +306,11 @@ worktrees inside the project count; else the one in `$CLAUDE_PROJECT_DIR`,
 where the session started; else the usual resolution): `allow` for `auto`, `ask`
 for `ask`; `strict` makes reads ask too. The config is read on every call, so
 changes take effect without reinstalling. `claude -p` (non-interactive)
-cannot answer a prompt, so use `mode = "auto"` there, in the global config
-or one passed with `--config` (a project file cannot loosen approval).
+cannot answer a prompt, so it needs `auto` for the tools it uses. Either
+set `mode = "auto"` in both the global config (the ceiling; it may contain
+only `[approval]`) and the project's `.farhand.toml`, or pass a config under
+another name with `--config` / `FARHAND_CONFIG`, which is trusted as it
+stands. The same holds for `codex exec` and `opencode run`.
 
 With the default `activation = "project"`, a user-scope install changes
 nothing in directories without a `.farhand.toml`: the hook refuses nothing
@@ -322,8 +348,13 @@ Three differences from the other agents. Codex runs a hook only after you
 have trusted it: after `install`, start Codex, open `/hooks` and trust
 FarHand's two hooks (again whenever `install` changes them). Until then the
 hooks do nothing. Codex hooks cannot ask, so `[approval]` is translated
-into per-tool approval modes when you run `install` (rerun it after
-changing it). And Codex lets a call through when a hook fails, so the
+into per-tool approval modes when you run `install`: at user scope from the
+global config, which is the most any project may allow, and at project
+scope (or with `--config`) from the config that applies. The `PreToolUse`
+hook also sees FarHand's own tools and refuses one that the config in force
+sets to `ask` while Codex's approval mode would run it unprompted, so a
+stale or broader install fails closed; rerun `install` to bring it in line.
+And Codex lets a call through when a hook fails, so the
 project-scope settings stay the stronger fence; Codex also loads a
 project's `.codex/config.toml` only once you have trusted that project. `activation` still applies: in a directory without
 `.farhand.toml`, the server lists no tools.

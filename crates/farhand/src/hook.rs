@@ -159,6 +159,12 @@ pub fn run_claude(explicit_config: Option<&Path>) -> anyhow::Result<()> {
 /// files, `view_image` reads a local image into the conversation.
 pub const CODEX_LOCAL_TOOLS: &[&str] = &["Bash", "apply_patch", "view_image"];
 
+/// What FarHand's Codex `PreToolUse` group matches: the local tools, and
+/// FarHand's own tools for the approval check.
+pub fn codex_matcher() -> String {
+    format!("{}|{MCP_PREFIX}.*", CODEX_LOCAL_TOOLS.join("|"))
+}
+
 #[derive(Deserialize)]
 struct CodexHookInput {
     #[serde(default)]
@@ -192,14 +198,45 @@ fn codex_session_context(text: &str) -> String {
 /// call through when its hook fails, so this hook only ever denies: a local
 /// tool wherever FarHand is active, and wherever the config does not load.
 /// At session start it tells the model, where FarHand is active, that the
-/// work is remote. `[approval]` stays with Codex's per-tool approval modes.
+/// work is remote.
+///
+/// `[approval]` reaches Codex as per-tool approval modes written by
+/// `install`, which can go stale or come from another folder's config (a
+/// user-scope install serves every project). So a `mcp__farhand__<tool>`
+/// call that the config here sets to `ask` is denied when the Codex config
+/// in force would run it without prompting.
 pub fn codex_respond(input_json: &str, explicit_config: Option<&Path>) -> Option<String> {
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))?;
+    codex_respond_in(
+        input_json,
+        explicit_config,
+        &codex_home,
+        dirs::home_dir().as_deref(),
+    )
+}
+
+enum CodexCall<'a> {
+    Local(&'a str),
+    FarHand(&'a str),
+    SessionStart,
+}
+
+fn codex_respond_in(
+    input_json: &str,
+    explicit_config: Option<&Path>,
+    codex_home: &Path,
+    home: Option<&Path>,
+) -> Option<String> {
     let input: CodexHookInput = serde_json::from_str(input_json).ok()?;
-    let local_tool = match input.hook_event_name.as_str() {
+    let call = match input.hook_event_name.as_str() {
         "PreToolUse" if CODEX_LOCAL_TOOLS.contains(&input.tool_name.as_str()) => {
-            Some(input.tool_name.as_str())
+            CodexCall::Local(input.tool_name.as_str())
         }
-        "SessionStart" => None,
+        "PreToolUse" => CodexCall::FarHand(input.tool_name.strip_prefix(MCP_PREFIX)?),
+        "SessionStart" => CodexCall::SessionStart,
         _ => return None,
     };
 
@@ -208,45 +245,124 @@ pub fn codex_respond(input_json: &str, explicit_config: Option<&Path>) -> Option
         Ok(l) => l.config,
         Err(farhand_core::Error::NoConfig) => return None,
         Err(e) => {
-            return Some(match local_tool {
-                Some(tool) => decision(
+            return Some(match call {
+                CodexCall::Local(tool) => decision(
                     "deny",
                     &format!(
                         "FarHand: cannot read its config ({e}); the local tool {tool} stays \
                          off until it is fixed (run `farhand check`)"
                     ),
                 ),
-                None => codex_session_context(&format!(
+                CodexCall::FarHand(tool) => decision(
+                    "deny",
+                    &format!(
+                        "FarHand: cannot read its config ({e}), so it cannot tell whether \
+                         {tool} needs approval; refused until it is fixed (run `farhand check`)"
+                    ),
+                ),
+                CodexCall::SessionStart => codex_session_context(&format!(
                     "FarHand is configured for this directory but its config does not load \
                      ({e}). Do no file or shell work; tell the user to fix it (`farhand \
                      check`)."
                 )),
-            })
+            });
         }
     };
 
-    Some(match local_tool {
-        Some(tool) => decision(
+    match call {
+        CodexCall::Local(tool) => Some(decision(
             "deny",
             &format!(
                 "FarHand: the local tool {tool} is disabled in this session; everything runs \
                  on the remote host. Use {} instead.",
                 codex_replacement(tool)
             ),
-        ),
-        None => codex_session_context(&format!(
-            "FarHand is active: this session works on the REMOTE host `{host}` in `{workdir}` \
-             over SSH, not on this machine. The working directory Codex reports is the local \
-             one; \"here\", \"this project\" and every relative path mean the remote workdir. \
-             Use FarHand's remote_* tools for every command and file operation; the local \
-             shell, apply_patch and view_image are refused. Use local_ls / local_read only when \
-             the user asks about their local folders, and upload / download to move files. A \
-             service started on the remote is not at localhost for the user: call remote_info \
-             for its address.",
-            host = config.remote.host,
-            workdir = config.remote.workdir,
         )),
-    })
+        CodexCall::FarHand(tool) => {
+            let wanted = config.approval.effective().get(tool).copied()?;
+            if wanted == ApprovalMode::Auto {
+                return None;
+            }
+            let cwd = input.cwd.as_deref()?;
+            let installed = codex_approval_mode(cwd, codex_home, home, tool)?;
+            (installed != "prompt").then(|| {
+                decision(
+                    "deny",
+                    &format!(
+                        "FarHand [approval]: {tool} is set to ask here, but Codex is set up to \
+                         run it without asking (`approval_mode = \"{installed}\"`, written by \
+                         `farhand install codex` from another config or before [approval] \
+                         changed). Refused; tell the user to rerun `farhand install codex` \
+                         (with `--scope project` for a project install)."
+                    ),
+                )
+            })
+        }
+        CodexCall::SessionStart => {
+            let remote = config.remote.as_ref()?;
+            Some(codex_session_context(&format!(
+                "FarHand is active: this session works on the REMOTE host `{host}` in \
+                 `{workdir}` over SSH, not on this machine. The working directory Codex reports \
+                 is the local one; \"here\", \"this project\" and every relative path mean the \
+                 remote workdir. Use FarHand's remote_* tools for every command and file \
+                 operation; the local shell, apply_patch and view_image are refused. Use \
+                 local_ls / local_read only when the user asks about their local folders, and \
+                 upload / download to move files. A service started on the remote is not at \
+                 localhost for the user: call remote_info for its address.",
+                host = remote.host,
+                workdir = remote.workdir,
+            )))
+        }
+    }
+}
+
+/// The approval mode Codex applies to FarHand's `tool` in `cwd`: from the
+/// nearest `.codex/config.toml` above `cwd` when that project is trusted
+/// and configures FarHand, else from the user's `config.toml` in
+/// `codex_home`. `None` when neither configures FarHand.
+fn codex_approval_mode(
+    cwd: &Path,
+    codex_home: &Path,
+    home: Option<&Path>,
+    tool: &str,
+) -> Option<String> {
+    let read = |p: &Path| -> Option<toml_edit::DocumentMut> {
+        std::fs::read_to_string(p).ok()?.parse().ok()
+    };
+    let mode_in = |doc: &toml_edit::DocumentMut| -> Option<String> {
+        let server = doc.get("mcp_servers")?.get("farhand")?;
+        server
+            .get("tools")
+            .and_then(|t| t.get(tool))
+            .and_then(|t| t.get("approval_mode"))
+            .or_else(|| server.get("default_tools_approval_mode"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+    };
+    let user = read(&codex_home.join("config.toml"));
+    let project = cwd
+        .ancestors()
+        .take_while(|d| d.parent().is_some() && Some(*d) != home)
+        .find(|d| d.join(".codex").join("config.toml").is_file());
+    if let Some(dir) = project {
+        // Codex reads a project's config only once the project is trusted.
+        let key = dir.to_string_lossy();
+        let trusted = user.as_ref().and_then(|u| {
+            u.get("projects")?
+                .get(key.as_ref())?
+                .get("trust_level")?
+                .as_str()
+        }) == Some("trusted");
+        if trusted {
+            if let Some(m) = read(&dir.join(".codex").join("config.toml"))
+                .as_ref()
+                .and_then(&mode_in)
+            {
+                return Some(m);
+            }
+        }
+    }
+    user.as_ref().and_then(mode_in)
 }
 
 pub fn run_codex(explicit_config: Option<&Path>) -> anyhow::Result<()> {
@@ -399,10 +515,106 @@ mod tests {
     }
 
     fn codex_call(cwd: &Path, event: &str, tool: &str) -> Option<serde_json::Value> {
+        let none = tempfile::tempdir().unwrap();
+        codex_call_in(cwd, none.path(), event, tool)
+    }
+
+    fn codex_call_in(
+        cwd: &Path,
+        codex_home: &Path,
+        event: &str,
+        tool: &str,
+    ) -> Option<serde_json::Value> {
         let input = serde_json::json!({
             "cwd": cwd, "hook_event_name": event, "tool_name": tool, "tool_input": {}
         });
-        codex_respond(&input.to_string(), None).map(|s| serde_json::from_str(&s).unwrap())
+        codex_respond_in(&input.to_string(), None, codex_home, None)
+            .map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    fn codex_farhand(modes: &str) -> String {
+        format!(
+            "[mcp_servers.farhand]\ncommand = \"farhand\"\n\
+             default_tools_approval_mode = \"prompt\"\n{modes}"
+        )
+    }
+
+    #[test]
+    fn codex_denies_a_farhand_tool_installed_looser_than_the_config() {
+        let d = cfg_dir("mode='ask'\ntools={ remote_write='auto' }");
+        let codex = tempfile::tempdir().unwrap();
+        std::fs::write(
+            codex.path().join("config.toml"),
+            codex_farhand(
+                "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"auto\"\n\
+                 [mcp_servers.farhand.tools.remote_edit]\napproval_mode = \"prompt\"\n",
+            ),
+        )
+        .unwrap();
+        let at = |tool: &str| codex_call_in(d.path(), codex.path(), "PreToolUse", tool);
+        // ask here, auto in Codex: refused
+        let v = at("mcp__farhand__remote_shell");
+        assert_eq!(kind(&v), "deny");
+        assert!(v.unwrap()["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("farhand install codex"));
+        // ask here, prompt in Codex (explicit or by default): Codex asks
+        assert!(at("mcp__farhand__remote_edit").is_none());
+        assert!(at("mcp__farhand__upload").is_none());
+        // auto here: nothing to check
+        assert!(at("mcp__farhand__remote_write").is_none());
+        // a read-only tool is auto under `ask`
+        assert!(at("mcp__farhand__remote_read").is_none());
+    }
+
+    #[test]
+    fn codex_uses_a_trusted_project_config_over_the_user_one() {
+        let d = cfg_dir("mode='ask'");
+        let codex = tempfile::tempdir().unwrap();
+        let auto = "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"auto\"\n";
+        let prompt = "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"prompt\"\n";
+        std::fs::create_dir_all(d.path().join(".codex")).unwrap();
+        std::fs::write(d.path().join(".codex/config.toml"), codex_farhand(prompt)).unwrap();
+        let user = |trusted: bool| {
+            let mut text = codex_farhand(auto);
+            if trusted {
+                text.push_str(&format!(
+                    "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                    d.path().display()
+                ));
+            }
+            std::fs::write(codex.path().join("config.toml"), text).unwrap();
+        };
+        let sub = d.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        let shell = || {
+            codex_call_in(
+                &sub,
+                codex.path(),
+                "PreToolUse",
+                "mcp__farhand__remote_shell",
+            )
+        };
+        // Untrusted: Codex ignores the project file, so the user's auto applies.
+        user(false);
+        assert_eq!(kind(&shell()), "deny");
+        user(true);
+        assert!(shell().is_none());
+    }
+
+    #[test]
+    fn codex_without_farhand_in_its_config_gets_no_approval_decision() {
+        let d = cfg_dir("mode='ask'");
+        let codex = tempfile::tempdir().unwrap();
+        std::fs::write(codex.path().join("config.toml"), "model = \"gpt\"\n").unwrap();
+        assert!(codex_call_in(
+            d.path(),
+            codex.path(),
+            "PreToolUse",
+            "mcp__farhand__remote_shell"
+        )
+        .is_none());
     }
 
     #[test]
@@ -411,8 +623,7 @@ mod tests {
         for t in CODEX_LOCAL_TOOLS {
             assert_eq!(kind(&codex_call(d.path(), "PreToolUse", t)), "deny", "{t}");
         }
-        // Codex has no `ask`: FarHand's own tools get no decision at all.
-        assert!(codex_call(d.path(), "PreToolUse", "mcp__farhand__remote_shell").is_none());
+        assert!(codex_call(d.path(), "PreToolUse", "mcp__other__thing").is_none());
         assert!(codex_call(d.path(), "PostToolUse", "Bash").is_none());
         let sub = d.path().join("src");
         std::fs::create_dir_all(&sub).unwrap();
@@ -435,6 +646,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(".farhand.toml"), "nonsense = [").unwrap();
         assert_eq!(kind(&codex_call(d.path(), "PreToolUse", "Bash")), "deny");
+        assert_eq!(
+            kind(&codex_call(
+                d.path(),
+                "PreToolUse",
+                "mcp__farhand__remote_read"
+            )),
+            "deny"
+        );
         let v = codex_call(d.path(), "SessionStart", "").unwrap();
         assert!(v["hookSpecificOutput"]["additionalContext"]
             .as_str()

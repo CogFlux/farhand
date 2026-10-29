@@ -24,7 +24,7 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use crate::hook::{CLAUDE_LOCAL_TOOLS, CODEX_LOCAL_TOOLS};
+use crate::hook::{codex_matcher, CLAUDE_LOCAL_TOOLS, CODEX_LOCAL_TOOLS};
 
 const OPENCODE_PLUGIN: &str = include_str!("../plugins/opencode/farhand.ts");
 const PLUGIN_BIN_PLACEHOLDER: &str = "const BUILT_IN_BIN = \"farhand\"";
@@ -861,8 +861,7 @@ fn plan_install_codex(opts: &Options) -> Result<Plan> {
     let mut doc = read_toml(&path)?;
     let before = doc.to_string();
 
-    let loaded = farhand_core::Config::load_in(Some(&opts.project), opts.config.as_deref())
-        .context("codex needs the FarHand config to translate [approval]")?;
+    let approval = codex_approval_source(opts)?;
     let serve = serve_command(opts)?;
 
     let mut server = toml_edit::Table::new();
@@ -876,7 +875,7 @@ fn plan_install_codex(opts: &Options) -> Result<Plan> {
     server["default_tools_approval_mode"] = toml_edit::value("prompt");
     let mut tools = toml_edit::Table::new();
     tools.set_implicit(true);
-    for (tool, mode) in loaded.config.approval.effective() {
+    for (tool, mode) in approval.effective() {
         let mut t = toml_edit::Table::new();
         t["approval_mode"] = toml_edit::value(match mode {
             farhand_core::config::ApprovalMode::Auto => "auto",
@@ -925,8 +924,32 @@ fn plan_install_codex(opts: &Options) -> Result<Plan> {
         ),
     });
     plan.next
-        .push("[approval] was translated now; rerun install after changing it".into());
+        .push(if opts.scope == Scope::User && opts.config.is_none() {
+            "[approval] was translated from the global config, the most any project may allow; \
+         the hook refuses a call a project sets to ask. Rerun install after changing it"
+                .into()
+        } else {
+            "[approval] was translated now; rerun install after changing it".into()
+        });
     Ok(plan)
+}
+
+/// The `[approval]` a Codex install translates. A user-scope entry without
+/// `--config` serves every project, so it takes the global config (or the
+/// defaults): the most any project may allow, never one folder's own
+/// settings. The hook refuses calls a stricter project sets to `ask`.
+fn codex_approval_source(opts: &Options) -> Result<farhand_core::config::ApprovalConfig> {
+    if opts.scope == Scope::User && opts.config.is_none() {
+        return Ok(farhand_core::Config::load_global()?
+            .map(|c| c.approval)
+            .unwrap_or_default());
+    }
+    Ok(
+        farhand_core::Config::load_in(Some(&opts.project), opts.config.as_deref())
+            .context("codex needs the FarHand config to translate [approval]")?
+            .config
+            .approval,
+    )
 }
 
 fn plan_uninstall_codex(opts: &Options) -> Result<Plan> {
@@ -1074,14 +1097,14 @@ fn apply_codex_hooks(doc: &mut toml_edit::DocumentMut, command: &str) -> Result<
         handler["timeout"] = toml_edit::value(10);
         // Codex shows this as the hook's name in /hooks and while it runs.
         handler["statusMessage"] = toml_edit::value(match *event {
-            "PreToolUse" => "FarHand: refuse local tools",
+            "PreToolUse" => "FarHand: refuse local tools, check approval",
             _ => "FarHand: tell the model it works remotely",
         });
         let mut handlers = toml_edit::ArrayOfTables::new();
         handlers.push(handler);
         let mut group = toml_edit::Table::new();
         if *event == "PreToolUse" {
-            group["matcher"] = toml_edit::value(CODEX_LOCAL_TOOLS.join("|"));
+            group["matcher"] = toml_edit::value(codex_matcher());
         }
         group["hooks"] = toml_edit::Item::ArrayOfTables(handlers);
 
@@ -1291,15 +1314,12 @@ mod tests {
         // The user's group keeps its place; Codex keys hook trust by position.
         assert_eq!(pre.get(0).unwrap()["matcher"].as_str(), Some("Bash"));
         let ours = pre.get(1).unwrap();
-        assert_eq!(
-            ours["matcher"].as_str(),
-            Some(CODEX_LOCAL_TOOLS.join("|").as_str())
-        );
+        assert_eq!(ours["matcher"].as_str(), Some(codex_matcher().as_str()));
         assert_eq!(ours["hooks"][0]["timeout"].as_integer(), Some(10));
         assert!(doc["hooks"]["SessionStart"][0].get("matcher").is_none());
         assert_eq!(
             ours["hooks"][0]["statusMessage"].as_str(),
-            Some("FarHand: refuse local tools")
+            Some("FarHand: refuse local tools, check approval")
         );
         // idempotent
         let once = doc.to_string();

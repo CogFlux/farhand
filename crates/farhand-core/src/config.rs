@@ -14,11 +14,18 @@
 //! activate; the global file activates only when its `activation` is
 //! `"always"` rather than the default `"project"`.
 //!
-//! A project file (any file named `.farhand.toml`, however it was found)
-//! can arrive with a cloned repository, so it may only tighten what the
-//! global config allows: it cannot loosen `[approval]`, allow local
-//! folders outside its own directory, or move the audit log. Such settings
-//! are ignored and reported in [`Loaded::notices`].
+//! A project file (any file named `.farhand.toml`, however it was found:
+//! by directory, `--config` or `$FARHAND_CONFIG`) can arrive with a cloned
+//! repository, so it may only tighten what the global config allows: it
+//! cannot loosen `[approval]`, allow local folders outside its own
+//! directory, or move the audit log. Such settings are ignored and reported
+//! in [`Loaded::notices`]. A file under any other name, passed with
+//! `--config` or `$FARHAND_CONFIG`, is the user's own choice and is trusted
+//! like the global config.
+//!
+//! The global config may leave out `[remote]`: with the default
+//! `activation = "project"` it is only the floor project files are measured
+//! against and the source of the user's deny lists.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +40,10 @@ pub struct Config {
     /// When the global config alone should make a session remote.
     #[serde(default)]
     pub activation: ActivationMode,
-    pub remote: RemoteConfig,
+    /// Required everywhere except in the global config, which needs it only
+    /// for `activation = "always"`.
+    #[serde(default)]
+    pub remote: Option<RemoteConfig>,
     #[serde(default)]
     pub local: LocalConfig,
     #[serde(default)]
@@ -74,6 +84,48 @@ pub struct RemoteConfig {
     /// Passed to ssh as `ServerAliveInterval`; keeps NAT tables warm.
     #[serde(default = "default_alive_interval")]
     pub server_alive_interval_secs: u64,
+}
+
+impl RemoteConfig {
+    fn validate(&mut self) -> Result<()> {
+        if self.host.trim().is_empty() {
+            return Err(Error::Config("remote.host is empty".into()));
+        }
+        if self.host.starts_with('-') {
+            return Err(Error::Config("remote.host may not start with '-'".into()));
+        }
+        let raw = self.workdir.trim();
+        let w = raw.trim_end_matches(['/', '\\']);
+        let w = if w.is_empty() && raw.starts_with('/') {
+            "/".to_string()
+        } else if is_drive_root(raw) {
+            // `C:\` keeps its separator; `C:` alone would be drive-relative.
+            format!("{}\\", &raw[..2])
+        } else {
+            w.to_string()
+        };
+        let windows_abs = w.len() >= 3
+            && w.as_bytes()[0].is_ascii_alphabetic()
+            && w.as_bytes()[1] == b':'
+            && (w.as_bytes()[2] == b'\\' || w.as_bytes()[2] == b'/');
+        if !(w.starts_with('/')
+            || w == "~"
+            || w.starts_with("~/")
+            || w.starts_with("~\\")
+            || windows_abs)
+        {
+            return Err(Error::Config(
+                "remote.workdir must be an absolute path (`/srv/app`, `C:\\work`) or start with `~` \
+                 (the remote home)"
+                    .into(),
+            ));
+        }
+        self.workdir = w;
+        if self.shell.is_empty() {
+            return Err(Error::Config("remote.shell is empty".into()));
+        }
+        Ok(())
+    }
 }
 
 pub fn default_shell() -> Vec<String> {
@@ -201,6 +253,37 @@ pub enum Source {
     Global,
 }
 
+impl Source {
+    /// A path handed over by `--config` or `$FARHAND_CONFIG` is a project
+    /// file when it is named like one: it gets no more trust for having
+    /// been passed by path.
+    fn by_name(path: &Path, otherwise: Source) -> Source {
+        if path.file_name() == Some(".farhand.toml".as_ref()) {
+            Source::Project
+        } else {
+            otherwise
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Explicit => "explicit",
+            Source::Env => "env",
+            Source::Project => "project",
+            Source::Global => "global",
+        }
+    }
+
+    /// `"project"` for a file that may only tighten the global config,
+    /// `"global"` for one trusted like the global config itself.
+    pub fn trust(self) -> &'static str {
+        match self {
+            Source::Project => "project",
+            Source::Explicit | Source::Env | Source::Global => "global",
+        }
+    }
+}
+
 /// A config together with where it was found and whether it activates
 /// FarHand in the directory it was resolved for.
 #[derive(Debug, Clone)]
@@ -217,7 +300,9 @@ impl Loaded {
     pub fn active(&self) -> bool {
         match self.source {
             Source::Explicit | Source::Env | Source::Project => true,
-            Source::Global => self.config.activation == ActivationMode::Always,
+            Source::Global => {
+                self.config.activation == ActivationMode::Always && self.config.remote.is_some()
+            }
         }
     }
 }
@@ -331,12 +416,8 @@ impl Config {
     /// for in `cwd` (default: the process's working directory).
     pub fn load_in(cwd: Option<&Path>, explicit: Option<&Path>) -> Result<Loaded> {
         let (path, source) = match explicit {
-            // An agent entry may hand the project file over by path; it is
-            // still a project file and gets no more trust for that.
-            Some(p) if p.file_name() == Some(".farhand.toml".as_ref()) => {
-                (p.to_path_buf(), Source::Project)
-            }
-            Some(p) => (p.to_path_buf(), Source::Explicit),
+            // An agent entry may hand the project file over by path.
+            Some(p) => (p.to_path_buf(), Source::by_name(p, Source::Explicit)),
             None => Self::locate(cwd)?,
         };
         let text = std::fs::read_to_string(&path)
@@ -349,29 +430,8 @@ impl Config {
             _ => path.parent().map(Path::to_path_buf),
         };
         let (config, notices) = if source == Source::Project {
-            let global = Self::global_path();
-            let mut notices = Vec::new();
-            // The global config is the floor a project file is measured
-            // against and the source of the user's own deny lists. One that
-            // exists but does not load stops FarHand: falling back to the
-            // defaults would quietly drop both.
-            let baseline = if global.symlink_metadata().is_ok() {
-                let c = std::fs::read_to_string(&global)
-                    .map_err(Error::from)
-                    .and_then(|t| Self::parse(&t))
-                    .map_err(|e| {
-                        Error::Config(format!(
-                            "the global config {} does not load ({e}); fix or remove it",
-                            global.display()
-                        ))
-                    })?;
-                Some(c)
-            } else {
-                None
-            };
-            let (config, more) = Self::parse_project(&text, base.as_deref(), baseline.as_ref())?;
-            notices.extend(more);
-            (config, notices)
+            let baseline = Self::load_global()?;
+            Self::parse_project(&text, base.as_deref(), baseline.as_ref())?
         } else {
             (Self::parse_at(&text, base.as_deref())?, Vec::new())
         };
@@ -381,6 +441,27 @@ impl Config {
             source,
             notices,
         })
+    }
+
+    /// The global config, if there is one. It is the floor a project file
+    /// is measured against and the source of the user's own deny lists, so
+    /// one that exists but does not load is an error: falling back to the
+    /// defaults would quietly drop both.
+    pub fn load_global() -> Result<Option<Self>> {
+        let global = Self::global_path();
+        if global.symlink_metadata().is_err() {
+            return Ok(None);
+        }
+        std::fs::read_to_string(&global)
+            .map_err(Error::from)
+            .and_then(|t| Self::parse(&t))
+            .map(Some)
+            .map_err(|e| {
+                Error::Config(format!(
+                    "the global config {} does not load ({e}); fix or remove it",
+                    global.display()
+                ))
+            })
     }
 
     /// Parse a project file living in `base`, measured against `baseline`
@@ -485,14 +566,16 @@ impl Config {
         Ok((cfg, notices))
     }
 
-    /// Parse a config that belongs to no directory: `allowed_dirs` entries
-    /// must be absolute or `~/...`.
+    /// Parse the global config, which belongs to no directory:
+    /// `allowed_dirs` entries must be absolute or `~/...`, and `[remote]`
+    /// is needed only for `activation = "always"`.
     pub fn parse(text: &str) -> Result<Self> {
         Self::parse_at(text, None)
     }
 
     /// Parse a config file that lives in `base`; relative `allowed_dirs`
-    /// entries (`"."`, `"assets"`) are resolved against it.
+    /// entries (`"."`, `"assets"`) are resolved against it. With `base`
+    /// `None` this is the global config (see [`Config::parse`]).
     pub fn parse_at(text: &str, base: Option<&Path>) -> Result<Self> {
         let mut cfg: Config = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
         cfg.validate(base)?;
@@ -501,7 +584,9 @@ impl Config {
 
     fn locate(cwd: Option<&Path>) -> Result<(PathBuf, Source)> {
         if let Some(p) = std::env::var_os("FARHAND_CONFIG") {
-            return Ok((PathBuf::from(p), Source::Env));
+            let p = PathBuf::from(p);
+            let source = Source::by_name(&p, Source::Env);
+            return Ok((p, source));
         }
         let start = match cwd {
             Some(d) => std::path::absolute(d)?,
@@ -523,42 +608,22 @@ impl Config {
             .join("config.toml")
     }
 
+    /// `base` is the folder the file lives in; `None` means the global
+    /// config, which belongs to no folder.
     fn validate(&mut self, base: Option<&Path>) -> Result<()> {
-        if self.remote.host.trim().is_empty() {
-            return Err(Error::Config("remote.host is empty".into()));
-        }
-        if self.remote.host.starts_with('-') {
-            return Err(Error::Config("remote.host may not start with '-'".into()));
-        }
-        let raw = self.remote.workdir.trim();
-        let w = raw.trim_end_matches(['/', '\\']);
-        let w = if w.is_empty() && raw.starts_with('/') {
-            "/".to_string()
-        } else if is_drive_root(raw) {
-            // `C:\` keeps its separator; `C:` alone would be drive-relative.
-            format!("{}\\", &raw[..2])
-        } else {
-            w.to_string()
-        };
-        let windows_abs = w.len() >= 3
-            && w.as_bytes()[0].is_ascii_alphabetic()
-            && w.as_bytes()[1] == b':'
-            && (w.as_bytes()[2] == b'\\' || w.as_bytes()[2] == b'/');
-        if !(w.starts_with('/')
-            || w == "~"
-            || w.starts_with("~/")
-            || w.starts_with("~\\")
-            || windows_abs)
-        {
-            return Err(Error::Config(
-                "remote.workdir must be an absolute path (`/srv/app`, `C:\\work`) or start with `~` \
-                 (the remote home)"
-                    .into(),
-            ));
-        }
-        self.remote.workdir = w;
-        if self.remote.shell.is_empty() {
-            return Err(Error::Config("remote.shell is empty".into()));
+        match &mut self.remote {
+            Some(r) => r.validate()?,
+            None if base.is_some() => {
+                return Err(Error::Config(
+                    "[remote] is missing; only the global config may leave it out".into(),
+                ))
+            }
+            None if self.activation == ActivationMode::Always => {
+                return Err(Error::Config(
+                    "activation = \"always\" needs a [remote] section".into(),
+                ))
+            }
+            None => {}
         }
         if self.limits.command_timeout_secs == 0 || self.limits.max_command_timeout_secs == 0 {
             return Err(Error::Config("timeouts must be positive".into()));
@@ -584,8 +649,9 @@ impl Config {
                 // something inside it.
                 let Some(base) = base else {
                     return Err(Error::Config(format!(
-                        "local.allowed_dirs entry `{}` is relative; only a project \
-                         .farhand.toml may use relative entries (`\".\"` for its own folder)",
+                        "local.allowed_dirs entry `{}` is relative, but the global config \
+                         belongs to no folder: use an absolute or `~/...` path here (relative \
+                         entries belong in a .farhand.toml or a file passed with --config)",
                         d.display()
                     )));
                 };
@@ -701,8 +767,12 @@ pub fn expand_home(p: &Path) -> PathBuf {
 
 const EXAMPLE: &str = r#"# FarHand configuration.
 # As .farhand.toml in a project root, it makes that project remote.
-# As ~/.config/farhand/config.toml it is optional: only needed for
-# activation = "always" (or as the target of --config / FARHAND_CONFIG).
+# As ~/.config/farhand/config.toml it is optional: it is the ceiling every
+# project file is held to, and with activation = "always" it makes every
+# directory remote. Without "always" it may leave out [remote].
+# Trust follows the name: a file named .farhand.toml is a project file however
+# it is reached; any other file passed with --config / FARHAND_CONFIG is
+# trusted like the global config.
 
 # "project" (default): only directories that carry a .farhand.toml are
 #            remote; anywhere else the agent keeps its local tools and FarHand
@@ -762,6 +832,8 @@ allowed_dirs = ["."]
 # "strict": every tool prompts, reads and searches included.
 # A project .farhand.toml can make this stricter than the global config,
 # never looser: `auto` there only holds where the global config allows it.
+# The global mode is a ceiling, not a default: a project without its own
+# [approval] asks.
 mode = "ask"
 # Per-tool overrides (`ask` or `auto`), any tool name:
 # tools = { remote_write = "auto", remote_edit = "auto", remote_read = "ask" }
@@ -776,8 +848,8 @@ mod tests {
         // `farhand init` writes the example as a project file; its `"."`
         // is that file's folder, and is meaningless in the global config.
         let cfg = Config::parse_at(Config::example(), Some(Path::new("/proj"))).unwrap();
-        assert_eq!(cfg.remote.host, "devbox");
-        assert_eq!(cfg.remote.shell, vec!["bash", "-lc"]);
+        assert_eq!(cfg.remote.as_ref().unwrap().host, "devbox");
+        assert_eq!(cfg.remote.as_ref().unwrap().shell, vec!["bash", "-lc"]);
         assert_eq!(cfg.local.allowed_dirs, vec![PathBuf::from("/proj")]);
         assert!(Config::parse(Config::example()).is_err());
     }
@@ -860,18 +932,18 @@ mod tests {
         let err = Config::parse("[remote]\nhost='h'\nworkdir='rel'").unwrap_err();
         assert!(err.to_string().contains("absolute"));
         let cfg = Config::parse("[remote]\nhost='h'\nworkdir='~/'").unwrap();
-        assert_eq!(cfg.remote.workdir, "~");
+        assert_eq!(cfg.remote.as_ref().unwrap().workdir, "~");
         let cfg = Config::parse("[remote]\nhost='h'\nworkdir='/srv/app/'").unwrap();
-        assert_eq!(cfg.remote.workdir, "/srv/app");
+        assert_eq!(cfg.remote.as_ref().unwrap().workdir, "/srv/app");
         let cfg = Config::parse("[remote]\nhost='h'\nworkdir='C:\\work\\'").unwrap();
-        assert_eq!(cfg.remote.workdir, "C:\\work");
+        assert_eq!(cfg.remote.as_ref().unwrap().workdir, "C:\\work");
         let cfg = Config::parse("[remote]\nhost='h'\nworkdir='D:/'").unwrap();
-        assert_eq!(cfg.remote.workdir, "D:\\");
+        assert_eq!(cfg.remote.as_ref().unwrap().workdir, "D:\\");
         let cfg = Config::parse("[remote]\nhost='h'\nworkdir='C:'").unwrap();
-        assert_eq!(cfg.remote.workdir, "C:\\");
+        assert_eq!(cfg.remote.as_ref().unwrap().workdir, "C:\\");
         assert!(Config::parse("[remote]\nhost='h'\nworkdir='work'").is_err());
         let cfg = Config::parse("[remote]\nhost='h'\nworkdir='/'\nos='windows'").unwrap();
-        assert_eq!(cfg.remote.os, Os::Windows);
+        assert_eq!(cfg.remote.as_ref().unwrap().os, Os::Windows);
     }
 
     #[test]
@@ -1051,6 +1123,41 @@ mod tests {
         let l = Config::load_in(None, Some(&other)).unwrap();
         assert_eq!(l.source, Source::Explicit);
         assert_eq!(l.config.audit.log_dir, Some(PathBuf::from("/dev")));
+    }
+
+    #[test]
+    fn a_path_is_a_project_file_by_name_whichever_way_it_came() {
+        for otherwise in [Source::Explicit, Source::Env] {
+            let p = Path::new("/repo/.farhand.toml");
+            assert_eq!(Source::by_name(p, otherwise), Source::Project);
+            let p = Path::new("/repo/farhand.toml");
+            assert_eq!(Source::by_name(p, otherwise), otherwise);
+        }
+        assert_eq!(Source::Project.trust(), "project");
+        assert_eq!(Source::Env.trust(), "global");
+    }
+
+    #[test]
+    fn only_the_global_config_may_leave_out_remote() {
+        let cfg = Config::parse("[approval]\nmode='auto'").unwrap();
+        assert!(cfg.remote.is_none());
+        let err = Config::parse("activation='always'\n[approval]\nmode='auto'").unwrap_err();
+        assert!(err.to_string().contains("[remote]"), "{err}");
+        let err = Config::parse_at("[approval]\nmode='auto'", Some(Path::new("/p"))).unwrap_err();
+        assert!(err.to_string().contains("[remote] is missing"), "{err}");
+        let d = tempfile::tempdir().unwrap();
+        assert!(Config::parse_project("[approval]\nmode='ask'", Some(d.path()), None).is_err());
+    }
+
+    #[test]
+    fn a_global_config_without_remote_is_inactive() {
+        let l = Loaded {
+            config: Config::parse("activation='project'").unwrap(),
+            path: PathBuf::from("/g"),
+            source: Source::Global,
+            notices: Vec::new(),
+        };
+        assert!(!l.active());
     }
 
     #[test]

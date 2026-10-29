@@ -502,7 +502,7 @@ impl Remote {
     }
 
     /// The configured POSIX shell argv (`["bash", "-lc"]` by default).
-    pub(crate) fn shell(&self) -> &[String] {
+    pub fn shell(&self) -> &[String] {
         &self.cfg.shell
     }
 

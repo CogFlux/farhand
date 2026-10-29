@@ -2,8 +2,8 @@
 //! protocol stream stays clean.
 //!
 //! ```text
-//! farhand serve [--config PATH]               run the MCP server (what agents launch)
-//! farhand check [--config PATH] [-v]          connect once and show the setup; -v adds the model's instructions
+//! farhand serve [--config PATH] [--cwd DIR]   run the MCP server (what agents launch)
+//! farhand check [--config PATH] [--cwd DIR] [-v]   connect once and show the setup; -v adds the model's instructions
 //! farhand validate [--config PATH] [--cwd DIR] [--json]   parse the config only; no network
 //! farhand init                                print a configuration template
 //! farhand install <agent> [--scope user|project] [--config PATH] [--yes|--dry-run]
@@ -12,6 +12,7 @@
 //! farhand hook claude-code [--config PATH]    Claude Code PreToolUse hook (stdin JSON)
 //! farhand hook codex [--config PATH]          Codex PreToolUse / SessionStart hook (stdin JSON)
 //! farhand --version                           print the version
+//! farhand -h | help [command]                 the commands, or one command's options
 //! ```
 //!
 //! Agents: opencode, claude-code, codex.
@@ -27,17 +28,146 @@ use rmcp::ServiceExt;
 
 use crate::server::FarHand;
 
-fn usage() -> ! {
-    eprintln!(
-        "usage:\n  farhand serve [--config PATH]\n  farhand check [--config PATH] [-v]\n  \
-         farhand validate [--config PATH] [--cwd DIR] [--json]\n  farhand init\n  \
-         farhand install <opencode|claude-code|codex> [--scope user|project] [--config PATH] \
-         [--yes|--dry-run]\n  \
-         farhand uninstall <opencode|claude-code|codex> [--scope user|project] [--yes|--dry-run]\n  \
-         farhand status [--scope user|project]\n  \
-         farhand hook <claude-code|codex> [--config PATH]\n  farhand --version"
-    );
+const DOCS: &str = "https://github.com/CogFlux/farhand/blob/main/docs/USAGE.md";
+
+/// `farhand -h`: what each command is for, how a config is found, and
+/// where the full documentation lives.
+fn overview() -> String {
+    format!(
+        "farhand {version} — run a coding agent's tools on a remote host over SSH
+
+usage: farhand <command> [options]       farhand <command> -h for its options
+
+commands:
+  serve       run the MCP server (what agents launch)
+  check       connect once and show the setup, as the model will see it
+  validate    parse the config only, no network; --json for agent entries
+  init        print a configuration template
+  install     wire FarHand into opencode, claude-code or codex
+  uninstall   undo install
+  status      show what is installed where
+  hook        the hook command agent entries run (not for direct use)
+
+config, first hit wins:
+  --config PATH, $FARHAND_CONFIG, .farhand.toml in this folder or the
+  nearest one above it, ~/.config/farhand/config.toml
+  A file named .farhand.toml is a project file however it is found: it can
+  only tighten the global config. Any other file passed with --config or
+  $FARHAND_CONFIG is trusted like the global config.
+
+The remote can be any SSH host, including a Docker sandbox (host
+\"<name>.sbx\" after `sbx setup ssh`).
+
+docs: {DOCS}
+home: {home}",
+        version = env!("CARGO_PKG_VERSION"),
+        home = env!("CARGO_PKG_HOMEPAGE"),
+    )
+}
+
+const CONFIG_OPT: &str =
+    "  -c, --config PATH   use this config instead of resolving one per directory.
+                      Named .farhand.toml it is a project file (may only
+                      tighten the global config); any other name is trusted
+                      like the global config";
+
+/// `farhand <command> -h`. `None` for an unknown command.
+fn command_help(command: &str) -> Option<String> {
+    let text = match command {
+        "serve" => format!(
+            "usage: farhand serve [--config PATH] [--cwd DIR]
+
+Run the MCP server on stdio. Agents launch this; you normally do not. In a
+directory where FarHand is not active it offers no tools and says why.
+
+{CONFIG_OPT}
+  --cwd DIR           resolve the config for DIR instead of the working directory"
+        ),
+        "check" => format!(
+            "usage: farhand check [--config PATH] [--cwd DIR] [-v]
+
+Load the config, connect once, and show the host, workdir, platform,
+approval and local folders. Warns when a Docker sandbox (`*.sbx`) has a
+folder of this machine mounted read-write.
+
+{CONFIG_OPT}
+  --cwd DIR           check the config that applies in DIR
+  -v, --verbose       also print the instructions the model receives"
+        ),
+        "validate" => format!(
+            "usage: farhand validate [--config PATH] [--cwd DIR] [--json]
+
+Parse the config without touching the network, and show which file applies,
+whether FarHand is active, and the effective approval per tool. Settings a
+project file was not allowed to make are listed as notes.
+
+{CONFIG_OPT}
+  --cwd DIR           resolve the config for DIR
+  --json              one JSON object: ok, path, source (explicit, env,
+                      project or global), trust (project: may only tighten;
+                      global: trusted), active, host, workdir,
+                      max_command_timeout_secs, notices, approval; on error
+                      ok=false, code and error"
+        ),
+        "init" => "usage: farhand init
+
+Print a commented configuration template, e.g.
+  farhand init > .farhand.toml"
+            .to_string(),
+        "install" | "uninstall" => format!(
+            "usage: farhand {command} <opencode|claude-code|codex> [--scope user|project]
+                [--config PATH] [--yes|--dry-run]
+
+Show the changes to the agent's own config files, ask, then make them.
+
+  --scope user        every project of this user (default)
+  --scope project     this directory only (.mcp.json, .codex/, .opencode/)
+{CONFIG_OPT}
+                      (install only: the path is baked into the agent entry,
+                      and FarHand is active wherever that agent runs)
+  -y, --yes           make the changes without asking
+  --dry-run           show the changes, make none"
+        ),
+        "status" => "usage: farhand status [--scope user|project]
+
+Show which agents have FarHand installed, at user scope (default) or in
+this directory."
+            .to_string(),
+        "hook" => format!(
+            "usage: farhand hook <claude-code|codex> [--config PATH]
+
+The hook command `farhand install` writes into Claude Code and Codex. It
+reads the agent's hook JSON on stdin, refuses local tools where FarHand is
+active, and answers approval for FarHand's own tools.
+
+{CONFIG_OPT}"
+        ),
+        _ => return None,
+    };
+    Some(format!("{text}\n\ndocs: {DOCS}"))
+}
+
+/// A malformed command line: the command's usage on stderr, exit 2.
+fn usage(command: Option<&str>) -> ! {
+    match command.and_then(command_help) {
+        Some(h) => eprintln!("{h}"),
+        None => eprintln!("{}", overview()),
+    }
     std::process::exit(2);
+}
+
+fn help(command: Option<&str>) -> ! {
+    match command {
+        None => println!("{}", overview()),
+        Some(c) => match command_help(c) {
+            Some(h) => println!("{h}"),
+            None => {
+                eprintln!("farhand: unknown command `{c}`\n\n{}", overview());
+                std::process::exit(2);
+            }
+        },
+    }
+    std::process::exit(0);
 }
 
 struct Args {
@@ -53,11 +183,21 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
-    let command = it.next().unwrap_or_else(|| usage());
-    if matches!(command.as_str(), "--version" | "-V" | "version") {
-        println!("farhand {}", env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
+    let command = it.next().unwrap_or_else(|| usage(None));
+    match command.as_str() {
+        "--version" | "-V" | "version" => {
+            println!("farhand {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        "-h" | "--help" => help(None),
+        "help" => help(it.next().as_deref()),
+        c if command_help(c).is_none() => {
+            eprintln!("farhand: unknown command `{c}`\n\n{}", overview());
+            std::process::exit(2);
+        }
+        _ => {}
     }
+    let bad = || -> ! { usage(Some(&command)) };
     let mut target = None;
     let mut config = None;
     let mut cwd = None;
@@ -67,8 +207,8 @@ fn parse_args() -> Args {
     let mut confirm = install::Confirm::Ask;
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--config" | "-c" => config = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
-            "--cwd" => cwd = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
+            "--config" | "-c" => config = Some(PathBuf::from(it.next().unwrap_or_else(|| bad()))),
+            "--cwd" => cwd = Some(PathBuf::from(it.next().unwrap_or_else(|| bad()))),
             "--json" => json = true,
             "-v" | "--verbose" => verbose = true,
             "-y" | "--yes" => confirm = install::Confirm::Yes,
@@ -77,12 +217,12 @@ fn parse_args() -> Args {
                 scope = match it.next().as_deref() {
                     Some("user") => install::Scope::User,
                     Some("project") => install::Scope::Project,
-                    _ => usage(),
+                    _ => bad(),
                 }
             }
-            "-h" | "--help" => usage(),
+            "-h" | "--help" => help(Some(&command)),
             s if !s.starts_with('-') && target.is_none() => target = Some(s.to_string()),
-            _ => usage(),
+            _ => bad(),
         }
     }
     Args {
@@ -124,18 +264,26 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command.as_str() {
         "install" => {
-            let agent = install::Agent::parse(args.target.as_deref().unwrap_or_else(|| usage()))?;
+            let agent = install::Agent::parse(
+                args.target
+                    .as_deref()
+                    .unwrap_or_else(|| usage(Some(&args.command))),
+            )?;
             install::install(agent, &install_opts()?)
         }
         "uninstall" => {
-            let agent = install::Agent::parse(args.target.as_deref().unwrap_or_else(|| usage()))?;
+            let agent = install::Agent::parse(
+                args.target
+                    .as_deref()
+                    .unwrap_or_else(|| usage(Some(&args.command))),
+            )?;
             install::uninstall(agent, &install_opts()?)
         }
         "status" => install::status(&install_opts()?),
         "hook" => match args.target.as_deref() {
             Some("claude-code") | Some("claude") => hook::run_claude(args.config.as_deref()),
             Some("codex") => hook::run_codex(args.config.as_deref()),
-            _ => usage(),
+            _ => usage(Some("hook")),
         },
         "init" => {
             print!("{}", Config::example());
@@ -150,9 +298,11 @@ async fn main() -> anyhow::Result<()> {
                     Ok(l) => serde_json::json!({
                         "ok": true,
                         "path": l.path,
+                        "source": l.source.as_str(),
+                        "trust": l.source.trust(),
                         "active": l.active(),
-                        "host": l.config.remote.host,
-                        "workdir": l.config.remote.workdir,
+                        "host": l.config.remote.as_ref().map(|r| &r.host),
+                        "workdir": l.config.remote.as_ref().map(|r| &r.workdir),
                         "max_command_timeout_secs": l.config.limits.max_command_timeout_secs,
                         "notices": l.notices,
                         "approval": l.config
@@ -176,11 +326,15 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             let l = loaded?;
+            let remote = match &l.config.remote {
+                Some(r) => format!("host `{}`, workdir `{}`", r.host, r.workdir),
+                None => "no [remote]".to_string(),
+            };
             println!(
-                "ok: {} (host `{}`, workdir `{}`, active here: {}, approval {})",
+                "ok: {} ({} file, {}, active here: {}, approval {})",
                 l.path.display(),
-                l.config.remote.host,
-                l.config.remote.workdir,
+                l.source.as_str(),
+                remote,
                 l.active(),
                 l.config
                     .approval
@@ -190,6 +344,11 @@ async fn main() -> anyhow::Result<()> {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+            if l.source.trust() == "project" {
+                println!(
+                    "note: a .farhand.toml is a project file: it can only tighten the global config"
+                );
+            }
             for n in &l.notices {
                 println!("note: {n}");
             }
@@ -204,10 +363,18 @@ async fn main() -> anyhow::Result<()> {
             let l = Config::load_in(args.cwd.as_deref(), args.config.as_deref())?;
             let cfg = l.config.clone();
             println!(
-                "config:     {} (active here: {})",
+                "config:     {} ({} file, active here: {})",
                 l.path.display(),
+                l.source.as_str(),
                 l.active()
             );
+            let Some(remote) = cfg.remote.clone() else {
+                println!(
+                    "remote:     none: this global config has no [remote], so FarHand is \
+                     active only in folders with their own .farhand.toml"
+                );
+                return Ok(());
+            };
             for n in &l.notices {
                 println!("note:       {n}");
             }
@@ -216,14 +383,14 @@ async fn main() -> anyhow::Result<()> {
             let (platform, configured) = server.detected_platform().await?;
             println!(
                 "remote:     {} — connected, {} platform",
-                cfg.remote.host,
+                remote.host,
                 platform.name()
             );
             let (workdir, created) = server.workdir_state().await?;
             println!(
                 "workdir:    {}{}{}",
-                cfg.remote.workdir,
-                if workdir != cfg.remote.workdir {
+                remote.workdir,
+                if workdir != remote.workdir {
                     format!(" (= {workdir})")
                 } else {
                     String::new()
@@ -266,7 +433,7 @@ async fn main() -> anyhow::Result<()> {
             // A Docker sandbox created with a workspace path shares that
             // folder with this machine read-write: the remote would be
             // writing straight onto the local disk.
-            if is_sbx_host(&cfg.remote.host) {
+            if is_sbx_host(&remote.host) {
                 for share in server.writable_host_shares().await? {
                     println!(
                         "warning:    `{share}` is a folder of this machine mounted read-write \
@@ -292,11 +459,16 @@ async fn main() -> anyhow::Result<()> {
             let server = match Config::load_in(args.cwd.as_deref(), args.config.as_deref()) {
                 Ok(l) => {
                     let active = l.active();
-                    tracing::info!(config = %l.path.display(), host = %l.config.remote.host, active, "farhand starting");
+                    let host = l.config.remote.as_ref().map(|r| r.host.as_str());
+                    tracing::info!(config = %l.path.display(), source = l.source.as_str(), host, active, "farhand starting");
                     for n in &l.notices {
                         tracing::warn!("{n}");
                     }
-                    FarHand::new(l.config, active)?
+                    if active {
+                        FarHand::new(l.config, active)?
+                    } else {
+                        FarHand::inactive()
+                    }
                 }
                 Err(farhand_core::Error::NoConfig) => {
                     tracing::info!("no config found; serving inactive");
@@ -325,7 +497,7 @@ async fn main() -> anyhow::Result<()> {
             service.waiting().await?;
             Ok(())
         }
-        _ => usage(),
+        _ => usage(None),
     }
 }
 

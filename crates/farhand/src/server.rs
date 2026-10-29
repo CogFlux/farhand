@@ -172,10 +172,15 @@ pub struct DownloadArgs {
 #[tool_router]
 impl FarHand {
     pub fn new(config: Config, active: bool) -> farhand_core::Result<Self> {
+        let Some(remote) = config.remote.clone() else {
+            return Err(farhand_core::Error::Config(
+                "this config has no [remote] section; nothing to connect to".into(),
+            ));
+        };
         let guard = Guard::new(&config.guard)?;
         let local = LocalScope::new(&config.local.allowed_dirs);
-        let remote = Remote::new(config.remote.clone(), config.limits.clone());
-        let audit = Audit::open(config.audit_dir(), &config.remote.host)?;
+        let audit = Audit::open(config.audit_dir(), &remote.host)?;
+        let remote = Remote::new(remote, config.limits.clone());
         Ok(Self {
             inner: Some(Arc::new(Inner {
                 remote,
@@ -223,7 +228,6 @@ impl FarHand {
             )
             .to_string();
         }
-        let c = &self.inner().config;
         let dirs = if self.inner().local.is_empty() {
             "none (the local filesystem is closed)".to_string()
         } else {
@@ -273,8 +277,8 @@ impl FarHand {
              Nothing that looks like a credential (keys, tokens, .env files, agent configs) is \
              ever sent to the remote — if a call is refused for that reason, do not work around \
              it. Every action is written to an audit log the user can read.",
-            host = c.remote.host,
-            workdir = c.remote.workdir,
+            host = self.inner().remote.host(),
+            workdir = self.inner().remote.workdir(),
             hostname = addr.hostname,
             port = addr.port,
             alias = addr.alias,
@@ -925,8 +929,10 @@ impl FarHand {
         let c = &self.inner().config;
         let connected = self.inner().remote.is_connected().await;
         let workdir = match self.inner().remote.effective_workdir().await {
-            Ok(w) if w != c.remote.workdir => format!("{} (= {w})", c.remote.workdir),
-            _ => c.remote.workdir.clone(),
+            Ok(w) if w != self.inner().remote.workdir() => {
+                format!("{} (= {w})", self.inner().remote.workdir())
+            }
+            _ => self.inner().remote.workdir().to_string(),
         };
         let roots = if self.inner().local.is_empty() {
             "(none)".to_string()
@@ -945,15 +951,18 @@ impl FarHand {
                 "windows (remote_shell runs PowerShell; write PowerShell, not bash)".to_string(),
                 "PowerShell".to_string(),
             ),
-            Ok(Platform::Posix) => ("posix".to_string(), c.remote.shell.join(" ")),
-            Err(e) => (format!("unknown ({e})"), c.remote.shell.join(" ")),
+            Ok(Platform::Posix) => ("posix".to_string(), self.inner().remote.shell().join(" ")),
+            Err(e) => (
+                format!("unknown ({e})"),
+                self.inner().remote.shell().join(" "),
+            ),
         };
         self.finish(Record::new("remote_info"), started);
         Ok(ok(format!(
             "host: {}\nreachable from the user's machine as: {} (ssh port {})\nworkdir: {}\n\
              os: {}\nconnected: {}\nshell: {}\ncommand timeout: {}s (max {}s)\n\
              allowed local directories:\n{}\naudit log: {}\nbuilt-in upload excludes: {}",
-            c.remote.host,
+            self.inner().remote.host(),
             addr.hostname,
             addr.port,
             workdir,
