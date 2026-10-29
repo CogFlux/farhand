@@ -329,16 +329,6 @@ fn codex_approval_mode(
     let read = |p: &Path| -> Option<toml_edit::DocumentMut> {
         std::fs::read_to_string(p).ok()?.parse().ok()
     };
-    let mode_in = |doc: &toml_edit::DocumentMut| -> Option<String> {
-        let server = doc.get("mcp_servers")?.get("farhand")?;
-        server
-            .get("tools")
-            .and_then(|t| t.get(tool))
-            .and_then(|t| t.get("approval_mode"))
-            .or_else(|| server.get("default_tools_approval_mode"))
-            .and_then(|m| m.as_str())
-            .map(str::to_string)
-    };
     let user = read(&codex_home.join("config.toml"));
     let project = cwd
         .ancestors()
@@ -354,15 +344,27 @@ fn codex_approval_mode(
                 .as_str()
         }) == Some("trusted");
         if trusted {
-            if let Some(m) = read(&dir.join(".codex").join("config.toml"))
-                .as_ref()
-                .and_then(&mode_in)
+            if let Some(m) =
+                read(&dir.join(".codex").join("config.toml")).and_then(|d| codex_mode_in(&d, tool))
             {
                 return Some(m);
             }
         }
     }
-    user.as_ref().and_then(mode_in)
+    user.and_then(|u| codex_mode_in(&u, tool))
+}
+
+/// `tool`'s approval mode in one Codex config, falling back to the
+/// server's default; `None` when the file does not configure FarHand.
+fn codex_mode_in(doc: &toml_edit::DocumentMut, tool: &str) -> Option<String> {
+    let server = doc.get("mcp_servers")?.get("farhand")?;
+    server
+        .get("tools")
+        .and_then(|t| t.get(tool))
+        .and_then(|t| t.get("approval_mode"))
+        .or_else(|| server.get("default_tools_approval_mode"))
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
 }
 
 pub fn run_codex(explicit_config: Option<&Path>) -> anyhow::Result<()> {
