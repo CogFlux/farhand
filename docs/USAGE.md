@@ -258,8 +258,10 @@ instead of `edit`), `glob`, `grep`, `list`, the LSP tools and (OpenCode 2)
 the `browser_*` tools and the experimental `tui_*` terminal tools (OpenCode
 1 cannot remove tools from a plugin, so there they are `deny` permissions,
 which outrank any rule of yours for them), turns Code Mode off for every
-MCP server (its `execute` sandbox can `fetch` `file://` URLs, so `execute`
-is refused as well; your other MCP tools are offered directly instead),
+MCP server (its `execute` sandbox can `fetch` `file://` URLs, so on
+OpenCode 2 every agent also gets a `deny` rule for `execute`, which keeps it
+out of the model's tool list; your other MCP tools are offered directly
+instead),
 refuses all of these again at call time, translates `[approval]` into OpenCode's permissions, and tells the
 model in the system prompt that it is working remotely. On OpenCode 1 a
 `farhand*` key you set yourself in `opencode.jsonc` wins; on OpenCode 2 a
@@ -331,10 +333,14 @@ farhand install codex --scope project    # this project: also local shell off, s
 Codex (2026) can switch its own shell tool off (`features.shell_tool = false`,
 `features.unified_exec = false`), sandbox the rest (`sandbox_mode =
 "read-only"`), and approve MCP tools per tool
-(`mcp_servers.farhand.tools.<tool>.approval_mode = "auto" | "prompt"`), so a
+(`mcp_servers.farhand.tools.<tool>.approval_mode`), so a
 project-scope install is a real FarHand session: the model has no local
 shell, cannot write locally, and `[approval]` decides which FarHand tools
-prompt.
+prompt. FarHand's `auto` is written as `approve` and `ask` as `prompt`.
+Codex's own `auto` is not used: it asks for any tool without read-only MCP
+annotations, so every call would prompt, and under `codex exec` every call
+would be refused. Installs from 0.2.20 or earlier wrote `auto`; rerun
+`farhand install codex` to fix them.
 
 Both scopes also add two hooks that run `farhand hook codex` (Codex 0.164
 or later). `PreToolUse` refuses Codex's local tools — `Bash` (its shell,

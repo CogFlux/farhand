@@ -875,10 +875,13 @@ fn plan_install_codex(opts: &Options) -> Result<Plan> {
     server["default_tools_approval_mode"] = toml_edit::value("prompt");
     let mut tools = toml_edit::Table::new();
     tools.set_implicit(true);
+    // Codex's own `auto` defers to the tool's MCP annotations and asks for
+    // a tool that has none, as FarHand's do; only `approve` runs a call
+    // unasked, which `codex exec` needs.
     for (tool, mode) in approval.effective() {
         let mut t = toml_edit::Table::new();
         t["approval_mode"] = toml_edit::value(match mode {
-            farhand_core::config::ApprovalMode::Auto => "auto",
+            farhand_core::config::ApprovalMode::Auto => "approve",
             _ => "prompt",
         });
         tools[tool] = toml_edit::Item::Table(t);

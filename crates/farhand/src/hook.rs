@@ -284,8 +284,11 @@ fn codex_respond_in(
                 return None;
             }
             let cwd = input.cwd.as_deref()?;
+            // `approve` is Codex's only mode that never asks: `auto` and
+            // `writes` ask for a tool without a read-only annotation, and
+            // FarHand's tools carry none.
             let installed = codex_approval_mode(cwd, codex_home, home, tool)?;
-            (installed != "prompt").then(|| {
+            (installed == "approve").then(|| {
                 decision(
                     "deny",
                     &format!(
@@ -548,13 +551,15 @@ mod tests {
         std::fs::write(
             codex.path().join("config.toml"),
             codex_farhand(
-                "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"auto\"\n\
-                 [mcp_servers.farhand.tools.remote_edit]\napproval_mode = \"prompt\"\n",
+                "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"approve\"\n\
+                 [mcp_servers.farhand.tools.remote_edit]\napproval_mode = \"prompt\"\n\
+                 [mcp_servers.farhand.tools.remote_kill]\napproval_mode = \"auto\"\n\
+                 [mcp_servers.farhand.tools.remote_spawn]\napproval_mode = \"writes\"\n",
             ),
         )
         .unwrap();
         let at = |tool: &str| codex_call_in(d.path(), codex.path(), "PreToolUse", tool);
-        // ask here, auto in Codex: refused
+        // ask here, approve in Codex: refused
         let v = at("mcp__farhand__remote_shell");
         assert_eq!(kind(&v), "deny");
         assert!(v.unwrap()["hookSpecificOutput"]["permissionDecisionReason"]
@@ -564,6 +569,9 @@ mod tests {
         // ask here, prompt in Codex (explicit or by default): Codex asks
         assert!(at("mcp__farhand__remote_edit").is_none());
         assert!(at("mcp__farhand__upload").is_none());
+        // Codex's auto and writes ask too for a tool without annotations
+        assert!(at("mcp__farhand__remote_kill").is_none());
+        assert!(at("mcp__farhand__remote_spawn").is_none());
         // auto here: nothing to check
         assert!(at("mcp__farhand__remote_write").is_none());
         // a read-only tool is auto under `ask`
@@ -574,7 +582,7 @@ mod tests {
     fn codex_uses_a_trusted_project_config_over_the_user_one() {
         let d = cfg_dir("mode='ask'");
         let codex = tempfile::tempdir().unwrap();
-        let auto = "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"auto\"\n";
+        let auto = "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"approve\"\n";
         let prompt = "[mcp_servers.farhand.tools.remote_shell]\napproval_mode = \"prompt\"\n";
         std::fs::create_dir_all(d.path().join(".codex")).unwrap();
         std::fs::write(d.path().join(".codex/config.toml"), codex_farhand(prompt)).unwrap();

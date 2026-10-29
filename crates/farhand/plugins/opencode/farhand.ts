@@ -282,8 +282,11 @@ async function setupV2(ctx: any) {
 
   // Code Mode exposes MCP tools through `execute`, a JavaScript sandbox
   // whose `fetch` can read local files. With it off for every server, the
-  // user's other MCP tools are offered directly instead and no `execute`
-  // tool is needed; the fence below refuses it if one appears anyway.
+  // user's other MCP tools are offered directly instead. `execute` itself
+  // is not in the tool registry for the transform above to remove: it is
+  // added when the tool list is built, unless the agent's permissions deny
+  // it outright (2.0.29), so the agent rules below do that; the fence
+  // refuses it if one appears anyway.
   await ctx.mcp.transform((editor: any) => {
     for (const [name] of editor.list()) {
       editor.update(name, (config: any) => {
@@ -330,6 +333,11 @@ async function setupV2(ctx: any) {
     for (const agent of editor.list()) {
       editor.update(agent.id, (a: any) => {
         const rules: PermissionRule[] = a.permissions
+        // Last, so it is the rule that decides: a whole-resource deny is
+        // what keeps OpenCode from offering `execute` at all.
+        const exec = rules.findLast((r) => wildcard(r.action, "execute"))
+        if (!(exec?.resource === "*" && exec.effect === "deny"))
+          rules.push({ action: "execute", resource: "*", effect: "deny" })
         for (const action of askTools) {
           const own = rules.some((r) => r.action !== "*" && wildcard(r.action, action))
           const last = rules.findLast((r) => wildcard(r.action, action) && r.resource === "*")
