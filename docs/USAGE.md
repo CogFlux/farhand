@@ -350,6 +350,12 @@ model that the session is remote, since Codex itself reports the local
 working directory. With them, a user-scope install is enough: directories
 with a `.farhand.toml` lose the local tools, the rest keep them.
 
+The hooks live in `hooks.json` next to the `config.toml` of the scope
+(`~/.codex/hooks.json` or `<project>/.codex/hooks.json`), beside any other
+tool's hooks; FarHand adds and removes only its own entries. Installs from
+0.2.21 or earlier wrote them into `config.toml`; rerun `farhand install
+codex` to move them, then trust them again in `/hooks`.
+
 Three differences from the other agents. Codex runs a hook only after you
 have trusted it: after `install`, start Codex, open `/hooks` and trust
 FarHand's two hooks (again whenever `install` changes them). Until then the

@@ -391,7 +391,8 @@ through. Tested at project scope.
 per-tool `approval_mode`, and adds a `PreToolUse` hook (`farhand hook
 codex`) that refuses Codex's local shell, `apply_patch` and `view_image`
 wherever FarHand is active, plus a `SessionStart` hook that tells the model
-it works remotely. Because the approval modes are written at install time,
+it works remotely. The server goes into `.codex/config.toml`, the hooks into
+`.codex/hooks.json` beside it. Because the approval modes are written at install time,
 the same hook refuses a FarHand tool that the config in force sets to `ask`
 while Codex would run it without asking. Codex runs the hooks only once you
 trust them in its `/hooks` view. `--scope project` also turns Codex's shell

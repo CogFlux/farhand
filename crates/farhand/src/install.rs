@@ -6,7 +6,7 @@
 //! |---------------|---------------------------------|---------------------------------------------|-----------------------------------------|
 //! | `opencode`    | plugin file (embedded here)     | plugin: V1 `config` hook, V2 `tool.transform` | plugin `tool.execute.before` (V1 and V2) |
 //! | `claude-code` | `claude mcp add` / `.mcp.json`  | `permissions.deny` (project scope only)     | `PreToolUse` hook (`farhand hook`)      |
-//! | `codex`       | `[mcp_servers.farhand]` in TOML | `features.shell_tool = false` + read-only sandbox (project scope only) | `PreToolUse` hook (`farhand hook codex`); `tools.<t>.approval_mode` from `[approval]` |
+//! | `codex`       | `[mcp_servers.farhand]` in TOML | `features.shell_tool = false` + read-only sandbox (project scope only) | `PreToolUse` hook (`farhand hook codex`) in `hooks.json`; `tools.<t>.approval_mode` from `[approval]` |
 //!
 //! User scope never writes a static "local tools off" rule, because that
 //! would turn every session on the machine remote; there the dynamic
@@ -823,20 +823,33 @@ fn status_claude(opts: &Options) -> Result<Vec<String>> {
 // ---- Codex ------------------------------------------------------------------
 //
 // Codex reads `~/.codex/config.toml` and, for trusted projects,
-// `<project>/.codex/config.toml`. It can switch its shell tool off
-// (`features.shell_tool`), sandbox the rest read-only, and approve MCP tools
-// per tool — enough for a real FarHand session at project scope. Its hooks
-// can deny a call but not ask, so `[approval]` is translated when you run
-// `install` (run it again after changing it), and the hook only refuses
-// local tools and, at session start, tells the model it works remotely.
-// That makes user scope a FarHand session too, once the user has trusted
-// the hooks in Codex (`/hooks`): Codex runs no hook it has not been shown.
+// `<project>/.codex/config.toml`, plus a `hooks.json` beside each. It can
+// switch its shell tool off (`features.shell_tool`), sandbox the rest
+// read-only, and approve MCP tools per tool — enough for a real FarHand
+// session at project scope. Its hooks can deny a call but not ask, so
+// `[approval]` is translated when you run `install` (run it again after
+// changing it), and the hook only refuses local tools and, at session
+// start, tells the model it works remotely. That makes user scope a FarHand
+// session too, once the user has trusted the hooks in Codex (`/hooks`):
+// Codex runs no hook it has not been shown.
+//
+// The server goes into `config.toml`, the hooks into `hooks.json`, where
+// other tools register theirs. Installs from 0.2.21 or earlier wrote the
+// hooks into `config.toml`; `install` and `uninstall` take them out.
+
+fn codex_dir(opts: &Options) -> PathBuf {
+    match opts.scope {
+        Scope::User => home().join(".codex"),
+        Scope::Project => opts.project.join(".codex"),
+    }
+}
 
 fn codex_config_path(opts: &Options) -> PathBuf {
-    match opts.scope {
-        Scope::User => home().join(".codex").join("config.toml"),
-        Scope::Project => opts.project.join(".codex").join("config.toml"),
-    }
+    codex_dir(opts).join("config.toml")
+}
+
+fn codex_hooks_path(opts: &Options) -> PathBuf {
+    codex_dir(opts).join("hooks.json")
 }
 
 fn read_toml(path: &Path) -> Result<toml_edit::DocumentMut> {
@@ -893,7 +906,7 @@ fn plan_install_codex(opts: &Options) -> Result<Plan> {
     }
     doc["mcp_servers"]["farhand"] = toml_edit::Item::Table(server);
 
-    apply_codex_hooks(&mut doc, &agent_hook_command(opts, CODEX_HOOK_MARKER)?)?;
+    strip_legacy_codex_hooks(&mut doc);
 
     if opts.scope == Scope::Project {
         if !doc.contains_key("features") {
@@ -908,17 +921,30 @@ fn plan_install_codex(opts: &Options) -> Result<Plan> {
     if after == before {
         plan.notes
             .push(format!("{} is already up to date", path.display()));
+    } else {
+        plan.write(path, after, None)?;
+    }
+
+    let hooks_path = codex_hooks_path(opts);
+    let mut hooks = read_json(&hooks_path)?;
+    if apply_codex_hooks(&mut hooks, &agent_hook_command(opts, CODEX_HOOK_MARKER)?)? {
+        plan.write(hooks_path, json_text(&hooks)?, None)?;
+        plan.next.push(
+            "Codex runs a new or changed hook only after you trust it: start Codex, open /hooks \
+             and trust FarHand's PreToolUse and SessionStart hooks"
+                .into(),
+        );
+    } else {
+        plan.notes
+            .push(format!("{} is already up to date", hooks_path.display()));
+    }
+
+    if plan.changes.is_empty() {
         return Ok(plan);
     }
-    plan.write(path, after, None)?;
-    plan.next.push(
-        "Codex runs a new or changed hook only after you trust it: start Codex, open /hooks \
-         and trust FarHand's PreToolUse and SessionStart hooks"
-            .into(),
-    );
     plan.next.push(match opts.scope {
         Scope::Project => "local shell off and sandbox read-only for this project; Codex loads \
-                           .codex/config.toml only after you trust the project"
+                           .codex/ only after you trust the project"
             .into(),
         Scope::User => format!(
             "once trusted, the hook refuses {} wherever FarHand is active (it needs Codex \
@@ -958,46 +984,54 @@ fn codex_approval_source(opts: &Options) -> Result<farhand_core::config::Approva
 fn plan_uninstall_codex(opts: &Options) -> Result<Plan> {
     let mut plan = Plan::new("uninstall", Agent::Codex, opts);
     let path = codex_config_path(opts);
-    if !path.exists() {
-        plan.notes
-            .push(format!("{} does not exist", path.display()));
-        return Ok(plan);
-    }
-    let mut doc = read_toml(&path)?;
-    let before = doc.to_string();
-    if let Some(servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_mut()) {
-        servers.remove("farhand");
-    }
-    if doc
-        .get("mcp_servers")
-        .and_then(|s| s.as_table())
-        .is_some_and(|t| t.is_empty())
-    {
-        doc.remove("mcp_servers");
-    }
-    strip_codex_hooks(&mut doc);
-    if opts.scope == Scope::Project {
-        if let Some(f) = doc.get_mut("features").and_then(|f| f.as_table_mut()) {
-            f.remove("shell_tool");
-            f.remove("unified_exec");
+    if path.exists() {
+        let mut doc = read_toml(&path)?;
+        let before = doc.to_string();
+        if let Some(servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_mut()) {
+            servers.remove("farhand");
         }
         if doc
-            .get("features")
-            .and_then(|f| f.as_table())
+            .get("mcp_servers")
+            .and_then(|s| s.as_table())
             .is_some_and(|t| t.is_empty())
         {
-            doc.remove("features");
+            doc.remove("mcp_servers");
         }
-        if doc.get("sandbox_mode").and_then(|v| v.as_str()) == Some("read-only") {
-            doc.remove("sandbox_mode");
+        strip_legacy_codex_hooks(&mut doc);
+        if opts.scope == Scope::Project {
+            if let Some(f) = doc.get_mut("features").and_then(|f| f.as_table_mut()) {
+                f.remove("shell_tool");
+                f.remove("unified_exec");
+            }
+            if doc
+                .get("features")
+                .and_then(|f| f.as_table())
+                .is_some_and(|t| t.is_empty())
+            {
+                doc.remove("features");
+            }
+            if doc.get("sandbox_mode").and_then(|v| v.as_str()) == Some("read-only") {
+                doc.remove("sandbox_mode");
+            }
         }
-    }
-    let after = doc.to_string();
-    if after == before {
-        plan.notes
-            .push(format!("nothing of FarHand's is in {}", path.display()));
+        let after = doc.to_string();
+        if after == before {
+            plan.notes
+                .push(format!("nothing of FarHand's is in {}", path.display()));
+        } else {
+            plan.write(path, after, None)?;
+        }
     } else {
-        plan.write(path, after, None)?;
+        plan.notes
+            .push(format!("{} does not exist", path.display()));
+    }
+
+    let hooks_path = codex_hooks_path(opts);
+    if hooks_path.exists() {
+        let mut hooks = read_json(&hooks_path)?;
+        if strip_codex_hooks(&mut hooks) {
+            plan.write(hooks_path, json_text(&hooks)?, None)?;
+        }
     }
     Ok(plan)
 }
@@ -1018,34 +1052,139 @@ fn status_codex(opts: &Options) -> Result<Vec<String>> {
         .and_then(|d| d.get("features").and_then(|f| f.get("shell_tool")))
         .and_then(|v| v.as_bool())
         == Some(false);
-    let hooked = doc.as_ref().is_some_and(|d| {
-        CODEX_HOOK_EVENTS.iter().all(|event| {
-            d.get("hooks")
-                .and_then(|h| h.get(event))
-                .and_then(|g| g.as_array_of_tables())
-                .is_some_and(|groups| groups.iter().any(is_codex_hook_group))
-        })
+    let hooks_path = codex_hooks_path(opts);
+    let hooks = read_json(&hooks_path).unwrap_or(json!({}));
+    let hooked = CODEX_HOOK_EVENTS.iter().all(|event| {
+        hooks["hooks"][event]
+            .as_array()
+            .is_some_and(|groups| groups.iter().any(is_codex_hook_group))
     });
-    Ok(vec![format!(
-        "mcp server: {}, local shell off: {shell_off}, hooks: {} ({})",
-        if present {
-            "registered"
-        } else {
-            "not registered"
-        },
-        if hooked {
-            "installed (trust them in Codex's /hooks)"
-        } else {
-            "not installed"
-        },
-        path.display()
-    )])
+    let legacy = doc.as_ref().is_some_and(has_legacy_codex_hooks);
+    Ok(vec![
+        format!(
+            "mcp server: {}, local shell off: {shell_off} ({})",
+            if present {
+                "registered"
+            } else {
+                "not registered"
+            },
+            path.display()
+        ),
+        format!(
+            "hooks: {}{} ({})",
+            if hooked {
+                "installed (trust them in Codex's /hooks)"
+            } else {
+                "not installed"
+            },
+            if legacy {
+                "; old copies in config.toml (run `farhand install codex`)"
+            } else {
+                ""
+            },
+            hooks_path.display()
+        ),
+    ])
 }
 
 /// The hook events FarHand registers with Codex.
 const CODEX_HOOK_EVENTS: &[&str] = &["PreToolUse", "SessionStart"];
 
-fn is_codex_hook_group(group: &toml_edit::Table) -> bool {
+fn is_codex_hook_group(group: &Value) -> bool {
+    group["hooks"].as_array().is_some_and(|hs| {
+        hs.iter().any(|h| {
+            h["command"]
+                .as_str()
+                .is_some_and(|c| c.contains(CODEX_HOOK_MARKER))
+        })
+    })
+}
+
+/// Add FarHand's `PreToolUse` and `SessionStart` groups to a `hooks.json`
+/// document, or bring them up to date in place: Codex keys a hook's trust
+/// by its position. Returns whether anything changed.
+fn apply_codex_hooks(doc: &mut Value, command: &str) -> Result<bool> {
+    let mut changed = false;
+    if !doc.is_object() {
+        *doc = json!({});
+    }
+    let hooks = doc
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    if !hooks.is_object() {
+        bail!("`hooks` in Codex's hooks.json is not an object");
+    }
+    for event in CODEX_HOOK_EVENTS {
+        // Codex shows `statusMessage` as the hook's name in /hooks and while it runs.
+        let mut group = serde_json::Map::new();
+        if *event == "PreToolUse" {
+            group.insert("matcher".into(), json!(codex_matcher()));
+        }
+        group.insert(
+            "hooks".into(),
+            json!([{
+                "type": "command",
+                "command": command,
+                "timeout": 10,
+                "statusMessage": match *event {
+                    "PreToolUse" => "FarHand: refuse local tools, check approval",
+                    _ => "FarHand: tell the model it works remotely",
+                },
+            }]),
+        );
+        let wanted = Value::Object(group);
+
+        let groups = hooks
+            .as_object_mut()
+            .unwrap()
+            .entry(*event)
+            .or_insert_with(|| json!([]));
+        let groups = groups
+            .as_array_mut()
+            .ok_or_else(|| anyhow!("`hooks.{event}` in Codex's hooks.json is not a list"))?;
+        match groups.iter().position(is_codex_hook_group) {
+            Some(i) if groups[i] == wanted => {}
+            Some(i) => {
+                groups[i] = wanted;
+                changed = true;
+            }
+            None => {
+                groups.push(wanted);
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// Remove what `apply_codex_hooks` added, and the entries it leaves empty.
+/// Returns whether anything changed.
+fn strip_codex_hooks(doc: &mut Value) -> bool {
+    let mut changed = false;
+    let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    for event in CODEX_HOOK_EVENTS {
+        if let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) {
+            let before = groups.len();
+            groups.retain(|g| !is_codex_hook_group(g));
+            if groups.len() != before {
+                changed = true;
+                if groups.is_empty() {
+                    hooks.remove(*event);
+                }
+            }
+        }
+    }
+    if changed && hooks.is_empty() {
+        doc.as_object_mut().unwrap().remove("hooks");
+    }
+    changed
+}
+
+fn is_legacy_codex_hook_group(group: &toml_edit::Table) -> bool {
     group
         .get("hooks")
         .and_then(|h| h.as_array_of_tables())
@@ -1058,96 +1197,18 @@ fn is_codex_hook_group(group: &toml_edit::Table) -> bool {
         })
 }
 
-/// The `[[hooks.<event>]]` array, converting an inline `<event> = [...]`
-/// the user may have written into the same array-of-tables form.
-fn codex_hook_groups<'a>(
-    doc: &'a mut toml_edit::DocumentMut,
-    event: &str,
-) -> Result<&'a mut toml_edit::ArrayOfTables> {
-    if !doc.contains_key("hooks") {
-        doc["hooks"] = implicit_table();
-    }
-    let hooks = doc["hooks"]
-        .as_table_like_mut()
-        .ok_or_else(|| anyhow!("`hooks` in the Codex config is not a table"))?;
-    let item = hooks
-        .entry(event)
-        .or_insert(toml_edit::Item::ArrayOfTables(Default::default()));
-    if !item.is_array_of_tables() {
-        let not_tables = || anyhow!("`hooks.{event}` in the Codex config is not a list of tables");
-        let list = item.as_array().ok_or_else(not_tables)?;
-        let mut groups = toml_edit::ArrayOfTables::new();
-        for v in list.iter() {
-            groups.push(
-                v.as_inline_table()
-                    .ok_or_else(not_tables)?
-                    .clone()
-                    .into_table(),
-            );
-        }
-        *item = toml_edit::Item::ArrayOfTables(groups);
-    }
-    Ok(item.as_array_of_tables_mut().unwrap())
+fn has_legacy_codex_hooks(doc: &toml_edit::DocumentMut) -> bool {
+    CODEX_HOOK_EVENTS.iter().any(|event| {
+        doc.get("hooks")
+            .and_then(|h| h.get(event))
+            .and_then(|g| g.as_array_of_tables())
+            .is_some_and(|groups| groups.iter().any(is_legacy_codex_hook_group))
+    })
 }
 
-/// Add FarHand's `PreToolUse` and `SessionStart` groups, or bring them up to
-/// date in place: Codex keys a hook's trust by its position.
-fn apply_codex_hooks(doc: &mut toml_edit::DocumentMut, command: &str) -> Result<()> {
-    for event in CODEX_HOOK_EVENTS {
-        let mut handler = toml_edit::Table::new();
-        handler["type"] = toml_edit::value("command");
-        handler["command"] = toml_edit::value(command);
-        handler["timeout"] = toml_edit::value(10);
-        // Codex shows this as the hook's name in /hooks and while it runs.
-        handler["statusMessage"] = toml_edit::value(match *event {
-            "PreToolUse" => "FarHand: refuse local tools, check approval",
-            _ => "FarHand: tell the model it works remotely",
-        });
-        let mut handlers = toml_edit::ArrayOfTables::new();
-        handlers.push(handler);
-        let mut group = toml_edit::Table::new();
-        if *event == "PreToolUse" {
-            group["matcher"] = toml_edit::value(codex_matcher());
-        }
-        group["hooks"] = toml_edit::Item::ArrayOfTables(handlers);
-
-        let groups = codex_hook_groups(doc, event)?;
-        let ours = groups.iter().position(is_codex_hook_group);
-        match ours {
-            Some(i) => {
-                let existing = groups.get_mut(i).unwrap();
-                if codex_group_fields(existing) != codex_group_fields(&group) {
-                    *existing = group;
-                }
-            }
-            None => groups.push(group),
-        }
-    }
-    Ok(())
-}
-
-/// A hook group's settings, nested handlers included, without formatting.
-/// (`Table`'s `Display` leaves out nested arrays of tables.)
-fn codex_group_fields(group: &toml_edit::Table) -> Vec<(String, String)> {
-    let value = |v: &toml_edit::Item| v.as_value().map(|v| v.to_string().trim().to_string());
-    let mut fields = Vec::new();
-    for (key, item) in group.iter() {
-        match item.as_array_of_tables() {
-            Some(handlers) => {
-                for (i, h) in handlers.iter().enumerate() {
-                    for (k, v) in h.iter() {
-                        fields.push((format!("{key}.{i}.{k}"), value(v).unwrap_or_default()));
-                    }
-                }
-            }
-            None => fields.push((key.to_string(), value(item).unwrap_or_default())),
-        }
-    }
-    fields
-}
-
-/// Remove what `apply_codex_hooks` added, and the tables it leaves empty.
-fn strip_codex_hooks(doc: &mut toml_edit::DocumentMut) {
+/// Remove the hooks installs from 0.2.21 or earlier wrote into Codex's
+/// `config.toml`, and the tables that leaves empty.
+fn strip_legacy_codex_hooks(doc: &mut toml_edit::DocumentMut) {
     let Some(hooks) = doc.get_mut("hooks").and_then(|h| h.as_table_like_mut()) else {
         return;
     };
@@ -1156,7 +1217,7 @@ fn strip_codex_hooks(doc: &mut toml_edit::DocumentMut) {
             .get_mut(event)
             .and_then(|g| g.as_array_of_tables_mut())
         {
-            groups.retain(|g| !is_codex_hook_group(g));
+            groups.retain(|g| !is_legacy_codex_hook_group(g));
             if groups.is_empty() {
                 hooks.remove(event);
             }
@@ -1308,57 +1369,71 @@ mod tests {
 
     #[test]
     fn codex_hooks_round_trip() {
-        let original = "model = \"gpt\"\n\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n\
-                        [[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"lint\"\n";
-        let mut doc: toml_edit::DocumentMut = original.parse().unwrap();
-        apply_codex_hooks(&mut doc, "/bin/farhand hook codex").unwrap();
-        let pre = doc["hooks"]["PreToolUse"].as_array_of_tables().unwrap();
-        assert_eq!(pre.len(), 2);
-        // The user's group keeps its place; Codex keys hook trust by position.
-        assert_eq!(pre.get(0).unwrap()["matcher"].as_str(), Some("Bash"));
-        let ours = pre.get(1).unwrap();
-        assert_eq!(ours["matcher"].as_str(), Some(codex_matcher().as_str()));
-        assert_eq!(ours["hooks"][0]["timeout"].as_integer(), Some(10));
-        assert!(doc["hooks"]["SessionStart"][0].get("matcher").is_none());
+        // herdr's hook, as it registers it.
+        let mut doc = json!({
+            "hooks": { "SessionStart": [ { "hooks": [ { "command": "bash herdr-agent-state.sh session", "timeout": 10, "type": "command" } ] } ] }
+        });
+        let original = doc.clone();
+        assert!(apply_codex_hooks(&mut doc, "/bin/farhand hook codex").unwrap());
+        let start = doc["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(start.len(), 2);
+        // The other group keeps its place; Codex keys hook trust by position.
+        assert_eq!(start[0], original["hooks"]["SessionStart"][0]);
+        assert!(start[1].get("matcher").is_none());
+        let ours = &doc["hooks"]["PreToolUse"][0];
+        assert_eq!(ours["matcher"], json!(codex_matcher()));
+        assert_eq!(ours["hooks"][0]["timeout"], 10);
         assert_eq!(
-            ours["hooks"][0]["statusMessage"].as_str(),
-            Some("FarHand: refuse local tools, check approval")
+            ours["hooks"][0]["statusMessage"],
+            "FarHand: refuse local tools, check approval"
         );
         // idempotent
-        let once = doc.to_string();
-        apply_codex_hooks(&mut doc, "/bin/farhand hook codex").unwrap();
-        assert_eq!(doc.to_string(), once);
+        assert!(!apply_codex_hooks(&mut doc, "/bin/farhand hook codex").unwrap());
         // a changed command is updated in place, not added again
-        apply_codex_hooks(&mut doc, "/new/farhand hook codex").unwrap();
-        let pre = doc["hooks"]["PreToolUse"].as_array_of_tables().unwrap();
-        assert_eq!(pre.len(), 2);
-        assert_eq!(
-            pre.get(1).unwrap()["hooks"][0]["command"].as_str(),
-            Some("/new/farhand hook codex")
-        );
+        assert!(apply_codex_hooks(&mut doc, "/new/farhand hook codex").unwrap());
+        let start = doc["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(start.len(), 2);
+        assert_eq!(start[1]["hooks"][0]["command"], "/new/farhand hook codex");
         // reversible
-        strip_codex_hooks(&mut doc);
-        assert_eq!(doc.to_string(), original);
+        assert!(strip_codex_hooks(&mut doc));
+        assert_eq!(doc, original);
+        assert!(!strip_codex_hooks(&mut doc));
     }
 
     #[test]
-    fn codex_hooks_accept_an_inline_list_and_leave_nothing_behind() {
-        let mut doc: toml_edit::DocumentMut = "[hooks]\nPreToolUse = []\n".parse().unwrap();
-        apply_codex_hooks(&mut doc, "farhand hook codex").unwrap();
-        assert_eq!(
-            doc["hooks"]["PreToolUse"]
-                .as_array_of_tables()
-                .unwrap()
-                .len(),
-            1
+    fn codex_hooks_from_empty_leave_nothing_behind() {
+        let mut doc = json!({});
+        assert!(apply_codex_hooks(&mut doc, "farhand hook codex").unwrap());
+        assert_eq!(doc["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert!(strip_codex_hooks(&mut doc));
+        assert_eq!(doc, json!({}));
+    }
+
+    #[test]
+    fn legacy_codex_hooks_leave_config_toml() {
+        let original = "model = \"gpt\"\n\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n\
+                        [[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"lint\"\n";
+        let legacy = format!(
+            "{original}\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n\
+             [[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"/bin/farhand hook codex\"\n\n\
+             [[hooks.SessionStart]]\n\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\n\
+             command = \"/bin/farhand hook codex\"\n"
         );
-        let reparsed: toml_edit::DocumentMut = doc.to_string().parse().unwrap();
-        assert_eq!(
-            reparsed["hooks"]["PreToolUse"][0]["hooks"][0]["type"].as_str(),
-            Some("command")
-        );
-        strip_codex_hooks(&mut doc);
-        assert!(doc.get("hooks").is_none());
+        let mut doc: toml_edit::DocumentMut = legacy.parse().unwrap();
+        assert!(has_legacy_codex_hooks(&doc));
+        strip_legacy_codex_hooks(&mut doc);
+        assert!(!has_legacy_codex_hooks(&doc));
+        assert_eq!(doc.to_string(), original);
+
+        // Codex's trust records stay where Codex keeps them.
+        let mut doc: toml_edit::DocumentMut = "[[hooks.SessionStart]]\n\n\
+             [[hooks.SessionStart.hooks]]\ncommand = \"farhand hook codex\"\n\n\
+             [hooks.state.\"x:session_start:0:0\"]\ntrusted_hash = \"h\"\n"
+            .parse()
+            .unwrap();
+        strip_legacy_codex_hooks(&mut doc);
+        assert!(doc["hooks"].get("SessionStart").is_none());
+        assert!(doc["hooks"]["state"].is_table_like());
     }
 
     #[test]
