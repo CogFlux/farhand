@@ -5,6 +5,7 @@
 //! refusal is returned as a tool-level error with the reason, so the model
 //! can adapt, and is recorded like every other outcome.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,8 +21,13 @@ use farhand_core::transfer::{Transfer, TransferReport, DEFAULT_EXCLUDES};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
-use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::service::RequestContext;
+use rmcp::{
+    schemars, tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
+};
 use serde::Deserialize;
+
+use crate::secret;
 
 const DEFAULT_READ_LINES: usize = 2000;
 const DEFAULT_GREP_RESULTS: usize = 200;
@@ -59,6 +65,12 @@ pub struct BashArgs {
     /// Seconds before the command is killed. Default and maximum come from
     /// the configuration.
     pub timeout_secs: Option<u64>,
+    /// On macOS, ask the user for a password in a local dialog and send it
+    /// once to the POSIX command's stdin. Requires the user to approve the
+    /// exact command in that dialog. Include no password in any argument.
+    /// Only the exit status is returned in this mode.
+    #[serde(default)]
+    pub password_stdin: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -253,6 +265,15 @@ impl FarHand {
                  PowerShell on Windows; remote_info reports which once connected. "
             }
         };
+        let password_note = if cfg!(target_os = "macos") {
+            "For a user-requested password delivery to a POSIX program, call remote_shell with \
+             password_stdin=true and the remote command that reads stdin. The user approves \
+             and enters the password in a local dialog. The call returns only an exit status. "
+        } else {
+            "For a user-requested password delivery to a POSIX program, give the user a \
+             `farhand secret -- COMMAND` invocation for their local terminal. Quote COMMAND \
+             as a single local shell argument. "
+        };
         format!(
             "FarHand: all work happens on the remote host `{host}`, in `{workdir}`. {platform_note}\
              The USER is at the local machine, not on the remote. The remote is reachable from \
@@ -274,9 +295,9 @@ impl FarHand {
              The local machine is closed except for these directories: {dirs}. Use local_ls and \
              local_read only when the user explicitly asks about those local folders, `upload` to \
              copy from them to the remote, and `download` to copy from the remote into them. \
-             Nothing that looks like a credential (keys, tokens, .env files, agent configs) is \
-             ever sent to the remote — if a call is refused for that reason, do not work around \
-             it. Every action is written to an audit log the user can read.",
+             The secret guard checks tool calls for credentials. If a call is refused for that \
+             reason, do not work around it. {password_note}Keep passwords out of \
+             chat and tool arguments. Every tool call is written to the audit log.",
             host = self.inner().remote.host(),
             workdir = self.inner().remote.workdir(),
             hostname = addr.hostname,
@@ -320,35 +341,80 @@ impl FarHand {
 
     #[tool(
         name = "remote_shell",
-        description = "Run a command ON THE REMOTE HOST in its own shell (POSIX shell on Linux/macOS, PowerShell on Windows). You are already there: do not ssh/scp/rsync to the same host or to the user's machine from inside it — use remote_read/remote_write to touch remote files and upload/download to cross to the local allowlist. Returns stdout, stderr and the exit code. Output is bounded; narrow it with head/tail/grep (Select-Object/Select-String on Windows). Runs in the remote workdir unless cwd is given."
+        description = "Run a command ON THE REMOTE HOST in its own shell (POSIX shell on Linux/macOS, PowerShell on Windows). You are already there: do not ssh/scp/rsync to the same host or to the user's machine from inside it — use remote_read/remote_write to touch remote files and upload/download to cross to the local allowlist. Returns stdout, stderr and the exit code. Output is bounded; narrow it with head/tail/grep (Select-Object/Select-String on Windows). Runs in the remote workdir unless cwd is given. For a user-requested password on a POSIX command's stdin, set password_stdin=true on a macOS client. The user enters and approves it in a local dialog, and only the exit status is returned."
     )]
     async fn remote_shell(
         &self,
         Parameters(a): Parameters<BashArgs>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        Ok(self.run_remote_shell(a, context.ct.cancelled()).await)
+    }
+
+    async fn run_remote_shell(
+        &self,
+        a: BashArgs,
+        cancelled: impl Future<Output = ()>,
+    ) -> CallToolResult {
         let started = Instant::now();
         let mut rec = Record::new("remote_shell");
-        rec.command = Some(&a.command);
+        if !a.password_stdin {
+            rec.command = Some(&a.command);
+        } else {
+            rec.target = Some("password stdin");
+        }
         if let Err(e) = self.guard_args(&[
             ("the command", Some(&a.command)),
             ("the cwd", a.cwd.as_deref()),
         ]) {
-            return Ok(self.refuse(rec, started, e));
+            return self.refuse(rec, started, e);
         }
-        match self
-            .inner()
-            .remote
-            .exec(&a.command, a.cwd.as_deref(), a.timeout_secs)
-            .await
-        {
+        let result = if a.password_stdin {
+            tokio::select! {
+                biased;
+                _ = cancelled => Err(Error::Denied("password delivery was cancelled".into())),
+                result = self.run_with_password(&a) => result,
+            }
+        } else {
+            self.inner()
+                .remote
+                .exec(&a.command, a.cwd.as_deref(), a.timeout_secs)
+                .await
+        };
+        match result {
             Ok(out) => {
                 rec.exit_code = Some(out.exit_code);
                 rec.outcome = if out.timed_out { "timeout" } else { "ok" };
                 self.finish(rec, started);
-                Ok(exec_result(&out))
+                exec_result(&out)
             }
-            Err(e) => Ok(self.fail(rec, started, e)),
+            Err(e) => self.fail(rec, started, e),
         }
+    }
+
+    async fn run_with_password(&self, a: &BashArgs) -> farhand_core::Result<ExecOutput> {
+        let inner = self.inner();
+        let remote = &inner.remote;
+        if remote.platform().await? != Platform::Posix {
+            return Err(Error::Invalid(
+                "password stdin requires a POSIX remote".into(),
+            ));
+        }
+        let workdir = remote.resolve(a.cwd.as_deref().unwrap_or_default()).await?;
+        self.guard_args(&[
+            ("the remote host", Some(remote.host())),
+            ("the cwd", Some(&workdir)),
+        ])?;
+        let password = secret::prompt_desktop(remote.host(), &workdir, &a.command).await?;
+        remote
+            .exec_with_password(
+                &inner.guard,
+                &a.command,
+                Some(&workdir),
+                a.timeout_secs,
+                password.as_bytes(),
+            )
+            .await
     }
 
     #[tool(
@@ -1274,13 +1340,16 @@ mod tests {
             .unwrap();
         assert_eq!(r.is_error, Some(true));
         let r = fh
-            .remote_shell(Parameters(BashArgs {
-                command: "ls".into(),
-                cwd: Some(format!("/tmp/{key}")),
-                timeout_secs: None,
-            }))
-            .await
-            .unwrap();
+            .run_remote_shell(
+                BashArgs {
+                    command: "ls".into(),
+                    cwd: Some(format!("/tmp/{key}")),
+                    timeout_secs: None,
+                    password_stdin: false,
+                },
+                std::future::pending(),
+            )
+            .await;
         assert_eq!(r.is_error, Some(true));
         let r = fh
             .download(Parameters(DownloadArgs {
@@ -1290,12 +1359,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.is_error, Some(true));
+        let r = fh
+            .run_remote_shell(
+                BashArgs {
+                    command: "example-command --password-stdin".into(),
+                    cwd: None,
+                    timeout_secs: None,
+                    password_stdin: true,
+                },
+                std::future::ready(()),
+            )
+            .await;
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(r).contains("password delivery was cancelled"));
         let log = std::fs::read_dir(&audit)
             .unwrap()
             .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
             .collect::<String>();
-        assert_eq!(log.lines().count(), 4, "{log}");
+        assert_eq!(log.lines().count(), 5, "{log}");
         assert!(!log.contains(key), "{log}");
+        assert!(!log.contains("example-command"), "{log}");
         assert!(log.lines().all(|l| l.contains("\"denied\"")), "{log}");
     }
 

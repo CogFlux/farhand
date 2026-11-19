@@ -206,7 +206,7 @@
 
   <div class="hero">
     <h1>Remote hands for coding agents.</h1>
-    <p class="lede">FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto another machine over SSH — Linux, macOS or Windows. The agent works there. Your laptop — and every credential on it — stays here.</p>
+    <p class="lede">FarHand moves every command and file operation of OpenCode, Claude Code or Codex onto another machine over SSH — Linux, macOS or Windows. Your agent and its credentials stay on your machine.</p>
     <div class="term" aria-label="Agent transcript example"><span class="you">› run the tests</span>
 <span class="tool">⚙ farhand_remote_shell</span> <span class="dim">[command=cargo test]</span>  <span class="dim">→ devbox:~/myapp</span>
 <span class="ok">test result: ok. 48 passed</span>
@@ -253,8 +253,9 @@ mode = "ask"               # ask | auto | strict</code></pre>
   </section>
 
   <section id="guard">
-    <h2>What never leaves your machine</h2>
-    <p>Every byte headed for the remote — command text, file content, edits, uploads — passes the secret guard first. A refusal names the rule, never the matched text, and there is no override flag.</p>
+    <h2>Secret guard</h2>
+    <p>Every remote tool payload — command text, file content, edits, uploads — passes the secret guard first. A refusal names the rule and omits the matched text.</p>
+    <p>On macOS, ask the agent to send a password to a remote POSIX program. FarHand displays the destination and command in a local dialog. Enter the password and approve to send one line to the command's standard input.</p>
     <table>
       <tr><th>By path</th><th>By content</th></tr>
       <tr>

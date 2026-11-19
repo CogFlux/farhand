@@ -2,7 +2,7 @@
 //! machine kept closed except for what the user explicitly opens.
 //!
 //! - [`config`] — where the remote is and what the local side may touch.
-//! - [`guard`] — the secret guard every outbound byte passes through.
+//! - [`guard`] — the secret guard every outbound tool payload passes through.
 //! - [`local`] — the local allowlist.
 //! - [`remote`] — the SSH session and the remote operations.
 //! - [`transfer`] — uploads and downloads across the two.

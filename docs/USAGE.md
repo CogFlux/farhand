@@ -82,14 +82,24 @@ allowed_dirs = ["."]       # this folder; or e.g. [".", "assets"]
 ```
 
 `farhand check` connects once and summarises the setup; `farhand check -v` also
-prints the instructions the model will receive, verbatim. If
-`ssh <host>` works in a terminal, this works. Host keys are checked strictly
+prints the instructions the model will receive, verbatim. Host keys are checked strictly
 (`StrictHostKeyChecking=yes`): FarHand only connects to hosts already in
 `~/.ssh/known_hosts`, so connect once by hand before the first `farhand check`.
 Your ssh config is read through a wrapper that clears port forwardings and
 turns off agent, X11 and GSSAPI credential forwarding for FarHand's
 connection, so a `RemoteForward` or `ForwardAgent yes` meant for your own
 sessions never reaches the model.
+
+On macOS, ask the agent to pass a password to a remote program that accepts
+it on stdin. The agent calls `remote_shell` with `password_stdin=true`.
+Review the host, workdir, and command in FarHand's local dialog, type the
+password, and click **Send password**. To use a terminal instead, run
+`farhand secret -- 'example-command --password-stdin'` with your agent's
+configuration. Both routes send one line, close stdin, and report the
+exit status. The password stays out of chat, shell arguments, and the
+audit log. Command output is discarded in case the program echoes its
+input. Review the command carefully because the remote program receives
+the plaintext password and controls what it does with it.
 
 `allowed_dirs` is the model's only window onto this machine. In a remote
 project the local folder holds nothing but `.farhand.toml`, so `"."` turns it

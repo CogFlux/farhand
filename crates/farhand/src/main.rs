@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! farhand serve [--config PATH] [--cwd DIR]   run the MCP server (what agents launch)
+//! farhand secret [--config PATH] [--cwd DIR] -- COMMAND   send a password to a remote command
 //! farhand check [--config PATH] [--cwd DIR] [-v]   connect once and show the setup; -v adds the model's instructions
 //! farhand validate [--config PATH] [--cwd DIR] [--json]   parse the config only; no network
 //! farhand init                                print a configuration template
@@ -19,6 +20,7 @@
 
 mod hook;
 mod install;
+mod secret;
 mod server;
 
 use std::path::PathBuf;
@@ -40,6 +42,7 @@ usage: farhand <command> [options]       farhand <command> -h for its options
 
 commands:
   serve       run the MCP server (what agents launch)
+  secret      approve sending a password to a remote command's stdin
   check       connect once and show the setup, as the model will see it
   validate    parse the config only, no network; --json for agent entries
   init        print a configuration template
@@ -79,6 +82,17 @@ fn command_help(command: &str) -> Option<String> {
 
 Run the MCP server on stdio. Agents launch this; you normally do not. In a
 directory where FarHand is not active it offers no tools and says why.
+
+{CONFIG_OPT}
+  --cwd DIR           resolve the config for DIR instead of the working directory"
+        ),
+        "secret" => format!(
+            "usage: farhand secret [--config PATH] [--cwd DIR] -- COMMAND
+
+Approve the destination and command in a local terminal, then enter a password
+without echo. FarHand runs COMMAND in the configured remote workdir, sends one
+password line to its standard input, and reports its exit status. COMMAND must
+be passed as one quoted argument and accept a password on standard input.
 
 {CONFIG_OPT}
   --cwd DIR           resolve the config for DIR instead of the working directory"
@@ -206,9 +220,18 @@ fn parse_args() -> Args {
     let mut scope = install::Scope::User;
     let mut confirm = install::Confirm::Ask;
     while let Some(a) = it.next() {
+        if command == "secret" && a == "--" {
+            target = Some(it.next().unwrap_or_else(|| bad()));
+            if it.next().is_some() {
+                bad();
+            }
+            break;
+        }
         match a.as_str() {
             "--config" | "-c" => config = Some(PathBuf::from(it.next().unwrap_or_else(|| bad()))),
             "--cwd" => cwd = Some(PathBuf::from(it.next().unwrap_or_else(|| bad()))),
+            "-h" | "--help" => help(Some(&command)),
+            _ if command == "secret" => bad(),
             "--json" => json = true,
             "-v" | "--verbose" => verbose = true,
             "-y" | "--yes" => confirm = install::Confirm::Yes,
@@ -220,7 +243,6 @@ fn parse_args() -> Args {
                     _ => bad(),
                 }
             }
-            "-h" | "--help" => help(Some(&command)),
             s if !s.starts_with('-') && target.is_none() => target = Some(s.to_string()),
             _ => bad(),
         }
@@ -288,6 +310,14 @@ async fn main() -> anyhow::Result<()> {
         "init" => {
             print!("{}", Config::example());
             Ok(())
+        }
+        "secret" => {
+            let command = args
+                .target
+                .as_deref()
+                .unwrap_or_else(|| usage(Some("secret")));
+            let loaded = Config::load_in(args.cwd.as_deref(), args.config.as_deref())?;
+            secret::run(loaded, command).await
         }
         "validate" => {
             // Agent entries call this at startup; `--json` gives them the
