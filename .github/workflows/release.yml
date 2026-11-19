@@ -7,12 +7,19 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -22,12 +29,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,         target: aarch64-apple-darwin }
-          - { os: macos-14,         target: x86_64-apple-darwin }
+          - { os: macos-15,         target: aarch64-apple-darwin }
+          - { os: macos-15-intel,   target: x86_64-apple-darwin }
           - { os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -35,7 +44,7 @@ jobs:
       - run: cargo build --release --locked --target ${{ matrix.target }} -p farhand
       - name: Package
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           name="farhand-${version}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/farhand" "dist/${name}/"
@@ -58,6 +67,7 @@ jobs:
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
