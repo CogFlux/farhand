@@ -90,17 +90,6 @@ turns off agent, X11 and GSSAPI credential forwarding for FarHand's
 connection, so a `RemoteForward` or `ForwardAgent yes` meant for your own
 sessions never reaches the model.
 
-On macOS, ask the agent to pass a password to a remote program that accepts
-it on stdin. The agent calls `remote_shell` with `password_stdin=true`.
-Review the host, workdir, and command in FarHand's local dialog, type the
-password, and click **Send password**. To use a terminal instead, run
-`farhand secret -- 'example-command --password-stdin'` with your agent's
-configuration. Both routes send one line, close stdin, and report the
-exit status. The password stays out of chat, shell arguments, and the
-audit log. Command output is discarded in case the program echoes its
-input. Review the command carefully because the remote program receives
-the plaintext password and controls what it does with it.
-
 `allowed_dirs` is the model's only window onto this machine. In a remote
 project the local folder holds nothing but `.farhand.toml`, so `"."` turns it
 into the project's local pocket: files you drop there can be uploaded, and

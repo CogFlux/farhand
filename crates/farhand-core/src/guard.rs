@@ -343,10 +343,6 @@ impl Guard {
                 detail: "content matched".into(),
             });
         }
-        self.check_custom_content(bytes)
-    }
-
-    fn check_custom_content(&self, bytes: &[u8]) -> Option<Finding> {
         let i = self
             .extra_content
             .iter()
@@ -355,20 +351,6 @@ impl Guard {
             rule: "config-deny-content",
             detail: format!("guard.deny_content[{i}]"),
         })
-    }
-
-    /// A user-approved password is expected to be a credential. Custom
-    /// content rules still apply, and this channel accepts one line only.
-    pub(crate) fn ensure_password_stdin(&self, bytes: &[u8]) -> Result<()> {
-        if bytes.is_empty() || bytes.iter().any(|b| matches!(b, b'\0' | b'\r' | b'\n')) {
-            return Err(Error::Invalid(
-                "the password must be one non-empty line".into(),
-            ));
-        }
-        if let Some(f) = self.check_custom_content(bytes) {
-            return Err(f.deny("the password"));
-        }
-        Ok(())
     }
 
     /// Whether any `CREDENTIAL_ASSIGNMENT` hit in `bytes` assigns a secret.
@@ -561,24 +543,6 @@ mod tests {
 
     fn guard() -> Guard {
         Guard::new(&GuardConfig::default()).unwrap()
-    }
-
-    #[test]
-    fn approved_password_stdin_still_obeys_custom_rules_and_requires_one_line() {
-        let g = Guard::new(&GuardConfig {
-            deny_content: vec!["example-forbidden".into()],
-            ..GuardConfig::default()
-        })
-        .unwrap();
-        let password = b"AKIAABCDEFGHIJKLMNOP";
-        assert!(g.ensure_content("example input", password).is_err());
-        assert!(g.ensure_password_stdin(password).is_ok());
-        let error = g.ensure_password_stdin(b"example-forbidden").unwrap_err();
-        assert!(matches!(error, Error::Denied(_)));
-        assert!(!error.to_string().contains("example-forbidden"));
-        for invalid in [b"".as_slice(), b"two\nlines", b"before\0after"] {
-            assert!(g.ensure_password_stdin(invalid).is_err());
-        }
     }
 
     #[test]

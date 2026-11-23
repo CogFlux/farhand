@@ -87,16 +87,6 @@ Configure).
 See `docs/USAGE.md` for the step-by-step guide and per-agent configuration;
 `farhand -h` and `farhand <command> -h` summarise the commands and options.
 
-### Passwords for remote commands
-
-On macOS, ask the agent to pass a password to the remote program that needs
-it. The agent calls `remote_shell` with `password_stdin=true`. FarHand
-opens a local dialog showing the host, working directory, and command.
-Enter the password and click **Send password**. FarHand sends one line to
-the command's standard input on the POSIX remote and returns its exit
-status. The terminal command `farhand secret -- 'example-command --password-stdin'`
-is also available.
-
 ## Update
 
 `farhand --version` says which version you have. Update the way you
@@ -292,9 +282,7 @@ and globs) — passes the secret guard first:
 
 Add your own with `[guard] deny_globs` / `deny_content`. A refusal comes back
 to the model as a tool error naming the rule, never the matched text, and is
-audited the same way. The password prompt accepts an explicitly approved
-password line for one command's stdin. Custom `deny_content` rules still
-apply.
+audited the same way.
 
 The local environment is never forwarded to the remote. Commands run in the
 remote user's own login shell.
