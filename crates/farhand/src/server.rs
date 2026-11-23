@@ -65,6 +65,18 @@ pub struct BashArgs {
     password_stdin: bool,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SecretInputArgs {
+    /// Short POSIX command that reads one secret line from stdin.
+    command: String,
+    /// Directory to run in. Defaults to the remote workdir; relative paths start there.
+    cwd: Option<String>,
+    /// Remote command timeout in seconds. The dialog has its own timeout.
+    timeout_secs: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SpawnArgs {
     /// The command to keep running on the remote host (a dev server, a
@@ -185,6 +197,19 @@ impl FarHand {
         let local = LocalScope::new(&config.local.allowed_dirs);
         let audit = Audit::open(config.audit_dir(), &remote.host)?;
         let remote = Remote::new(remote, config.limits.clone());
+        let tool_router = if active {
+            Self::tool_router()
+        } else {
+            ToolRouter::new()
+        };
+        #[cfg(target_os = "macos")]
+        let tool_router = if active && remote.configured_platform() != Some(Platform::Windows) {
+            let mut tool_router = tool_router;
+            tool_router.merge(Self::secret_input_router());
+            tool_router
+        } else {
+            tool_router
+        };
         Ok(Self {
             inner: Some(Arc::new(Inner {
                 remote,
@@ -194,11 +219,7 @@ impl FarHand {
                 config,
                 writes: tokio::sync::Mutex::new(()),
             })),
-            tool_router: if active {
-                Self::tool_router()
-            } else {
-                ToolRouter::new()
-            },
+            tool_router,
             active,
         })
     }
@@ -257,6 +278,13 @@ impl FarHand {
                  PowerShell on Windows; remote_info reports which once connected. "
             }
         };
+        let secret_note = if self.tool_router.has_route("remote_secret_input") {
+            "If the user asks to enter a secret for a remote command, offer remote_secret_input. \
+             Pass a command that reads it from stdin and let the user review it and enter the \
+             value in the local dialog. "
+        } else {
+            ""
+        };
         format!(
             "FarHand: all work happens on the remote host `{host}`, in `{workdir}`. {platform_note}\
              The USER is at the local machine, not on the remote. The remote is reachable from \
@@ -279,7 +307,7 @@ impl FarHand {
              local_read only when the user explicitly asks about those local folders, `upload` to \
              copy from them to the remote, and `download` to copy from the remote into them. \
              The secret guard checks tool calls for credentials. If a call is refused for that \
-             reason, do not work around it. Keep passwords out of chat and tool arguments. \
+             reason, do not work around it. {secret_note}Keep secrets out of chat and tool arguments. \
              Every tool call is written to the audit log.",
             host = self.inner().remote.host(),
             workdir = self.inner().remote.workdir(),
@@ -1058,6 +1086,83 @@ impl FarHand {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[tool_router(router = secret_input_router)]
+impl FarHand {
+    #[tool(
+        name = "remote_secret_input",
+        description = "Ask the user to enter a single-line secret, such as an API key, in a secure local macOS dialog. Use only when the user requests secret input. The user sees and approves the destination and exact POSIX command, which receives the secret on stdin. Provide a short command that reads stdin. Keep the secret out of chat and arguments. Returns the exit status."
+    )]
+    async fn remote_secret_input(
+        &self,
+        Parameters(a): Parameters<SecretInputArgs>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = Instant::now();
+        let mut rec = Record::new("remote_secret_input");
+        let inner = self.inner();
+        let remote = &inner.remote;
+        let prompt = async {
+            if a.command.trim().is_empty() {
+                return Err(Error::Invalid("the remote command is empty".into()));
+            }
+            self.guard_args(&[
+                ("the command", Some(&a.command)),
+                ("the cwd", a.cwd.as_deref()),
+                ("the remote host", Some(remote.host())),
+                ("the remote workdir", Some(remote.workdir())),
+            ])?;
+            if remote.platform().await? != Platform::Posix {
+                return Err(Error::Invalid(
+                    "secret input requires a POSIX remote".into(),
+                ));
+            }
+            let workdir = remote.resolve(a.cwd.as_deref().unwrap_or_default()).await?;
+            self.guard_args(&[("the resolved working directory", Some(&workdir))])?;
+            let secret = crate::secret_input::prompt(remote.host(), &workdir, &a.command).await?;
+            Ok((workdir, secret))
+        };
+        let approved = tokio::select! {
+            biased;
+            _ = context.ct.cancelled() => Err(Error::Denied("secret delivery was cancelled".into())),
+            result = prompt => result,
+        };
+        let (workdir, secret) = match approved {
+            Ok(input) => input,
+            Err(error) => return Ok(self.fail(rec, started, error)),
+        };
+        if inner.audit.failure().is_some() {
+            let error = Error::Denied("the audit log could not be written".into());
+            return Ok(self.deny(rec, started, error));
+        }
+        let result = remote
+            .exec_with_secret(
+                &inner.guard,
+                &a.command,
+                &workdir,
+                a.timeout_secs,
+                secret.as_bytes(),
+            )
+            .await;
+        Ok(match result {
+            Ok(out) => {
+                rec.exit_code = Some(out.exit_code);
+                rec.outcome = if out.timed_out { "timeout" } else { "ok" };
+                self.finish(rec, started);
+                exec_result(&out)
+            }
+            Err(error @ Error::Timeout { .. }) => {
+                rec.outcome = "timeout";
+                let message = error.to_string();
+                rec.error = Some(message.clone());
+                self.finish(rec, started);
+                CallToolResult::error(vec![ContentBlock::text(message)])
+            }
+            Err(error) => self.fail(rec, started, error),
+        })
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for FarHand {
     /// Every call goes through the router, unless the audit log has lost a
@@ -1239,6 +1344,25 @@ fn transfer_summary(verb: &str, r: &TransferReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_input_is_only_listed_on_macos_for_posix_remotes() {
+        let directory = tempfile::tempdir().unwrap();
+        let route = "remote_secret_input";
+        for os in ["posix", "windows", "auto"] {
+            let config = Config::parse(&format!(
+                "[remote]\nhost='nowhere.invalid'\nworkdir='/w'\nos='{os}'\n[audit]\nlog_dir='{}'",
+                directory.path().display()
+            ))
+            .unwrap();
+            let server = FarHand::new(config, true).unwrap();
+            assert_eq!(
+                server.tool_router.has_route(route),
+                cfg!(target_os = "macos") && os != "windows"
+            );
+        }
+        assert!(!FarHand::inactive().tool_router.has_route(route));
+    }
 
     #[test]
     fn edit_matches_lf_strings_in_crlf_files() {

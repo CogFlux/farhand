@@ -90,6 +90,13 @@ turns off agent, X11 and GSSAPI credential forwarding for FarHand's
 connection, so a `RemoteForward` or `ForwardAgent yes` meant for your own
 sessions never reaches the model.
 
+On macOS, ask the agent to use `remote_secret_input` when a POSIX remote
+command needs an API key or another single-line secret. Review the host,
+working directory and command in the dialog, enter the value in the masked
+field, and select **Send secret**. The command receives the value on stdin
+and FarHand returns its exit status. The command can use or store the value,
+so check the command before approving it.
+
 `allowed_dirs` is the model's only window onto this machine. In a remote
 project the local folder holds nothing but `.farhand.toml`, so `"."` turns it
 into the project's local pocket: files you drop there can be uploaded, and
@@ -166,6 +173,7 @@ Start the agent in any local directory. What the model gets:
 | It wants to | It calls | You see in the audit log |
 |---|---|---|
 | run a command | `remote_shell` | command, exit code, duration |
+| enter a secret for a remote command | `remote_secret_input` | outcome, exit code, duration |
 | keep a dev server or watcher running | `remote_spawn`, then `remote_jobs` / `remote_kill` | command, job id |
 | read / write / edit a file | `remote_read` / `remote_write` / `remote_edit` | path, bytes |
 | find files / search text | `remote_glob` / `remote_grep` | pattern |

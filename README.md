@@ -209,10 +209,10 @@ gets them as `deny` permissions), refuses them again at call time as a second fe
 remotely.
 
 Approval is FarHand's knob, not the agent's: `[approval] mode = "ask"`
-(default) makes the agent prompt before `remote_shell`, `remote_write`,
+(default) makes the agent prompt before `remote_shell`, `remote_secret_input`, `remote_write`,
 `remote_edit`, `remote_spawn`, `remote_kill`, `upload` and `download` and
 lets read-only tools run;
-`"auto"` prompts for nothing, with the audit log as the record; `"strict"`
+`"auto"` skips agent prompts, with the audit log as the record; `"strict"`
 prompts for everything, reads included; `tools = { remote_write = "auto" }`
 overrides per tool. A project `.farhand.toml` can make this stricter but not
 looser than the global config: the global mode is a ceiling, not a default,
@@ -243,6 +243,7 @@ The tools then appear as `farhand_remote_shell`, `farhand_upload`, and so on.
 | Tool | What it does |
 |---|---|
 | `remote_shell` | Run a command on the remote in its own shell — POSIX shell, or PowerShell on Windows (bounded output, remote timeout, local watchdog). |
+| `remote_secret_input` | On a macOS client, open a secure dialog to approve and pass one secret line to a POSIX remote command's stdin. |
 | `remote_read` | Read a remote file with line numbers; `offset`/`limit` page through it. |
 | `remote_write` | Create or overwrite a remote file; parents are created. |
 | `remote_edit` | Replace an exact, unique string in a remote file (`replace_all` optional; CRLF files are matched with LF strings and kept CRLF). |
@@ -283,6 +284,13 @@ and globs) — passes the secret guard first:
 Add your own with `[guard] deny_globs` / `deny_content`. A refusal comes back
 to the model as a tool error naming the rule, never the matched text, and is
 audited the same way.
+
+When you ask the agent to use `remote_secret_input`, review the host,
+workdir and exact command in the macOS dialog before selecting **Send
+secret**. The command receives one line on stdin, and FarHand returns its
+exit status. FarHand keeps the value out of model arguments and audit logs.
+Custom `deny_content` rules still apply to the input. The dialog requires
+your approval in every `[approval]` mode.
 
 The local environment is never forwarded to the remote. Commands run in the
 remote user's own login shell.

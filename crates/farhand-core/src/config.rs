@@ -335,6 +335,7 @@ impl ApprovalMode {
 /// The tools that change something on the remote or in the outbox.
 pub const MUTATING_TOOLS: &[&str] = &[
     "remote_shell",
+    "remote_secret_input",
     "remote_spawn",
     "remote_kill",
     "remote_write",
@@ -825,10 +826,10 @@ allowed_dirs = ["."]
 # deny_content = ["ACME-[0-9]{12}"]
 
 [approval]
-# "ask":    the agent prompts you before remote_shell, remote_write,
+# "ask":    the agent prompts you before remote_shell, remote_secret_input, remote_write,
 #           remote_edit, remote_spawn, remote_kill, upload and download;
 #           read-only tools run freely.
-# "auto":   nothing prompts; the audit log is your record.
+# "auto":   the agent skips prompts; secret input still requires dialog approval.
 # "strict": every tool prompts, reads and searches included.
 # A project .farhand.toml can make this stricter than the global config,
 # never looser: `auto` there only holds where the global config allows it.

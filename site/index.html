@@ -255,6 +255,7 @@ mode = "ask"               # ask | auto | strict</code></pre>
   <section id="guard">
     <h2>Secret guard</h2>
     <p>Every remote tool payload — command text, file content, edits, uploads — passes the secret guard first. A refusal names the rule and omits the matched text.</p>
+    <p>On macOS, <code>remote_secret_input</code> opens a secure dialog where you review a POSIX command and approve sending one secret line to its standard input.</p>
     <table>
       <tr><th>By path</th><th>By content</th></tr>
       <tr>

@@ -139,6 +139,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-foundation"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -234,9 +244,10 @@ dependencies = [
 
 [[package]]
 name = "farhand"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
+ "core-foundation",
  "dirs",
  "farhand-core",
  "rmcp",
@@ -249,11 +260,12 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
 name = "farhand-core"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1572,6 +1584,12 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "zeroize"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zmij"

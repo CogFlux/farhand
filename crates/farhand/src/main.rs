@@ -19,6 +19,8 @@
 
 mod hook;
 mod install;
+#[cfg(target_os = "macos")]
+mod secret_input;
 mod server;
 
 use std::path::PathBuf;

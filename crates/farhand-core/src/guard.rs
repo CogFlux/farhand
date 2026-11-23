@@ -343,6 +343,10 @@ impl Guard {
                 detail: "content matched".into(),
             });
         }
+        self.check_custom_content(bytes)
+    }
+
+    fn check_custom_content(&self, bytes: &[u8]) -> Option<Finding> {
         let i = self
             .extra_content
             .iter()
@@ -351,6 +355,20 @@ impl Guard {
             rule: "config-deny-content",
             detail: format!("guard.deny_content[{i}]"),
         })
+    }
+
+    /// The desktop dialog explicitly approves a user-entered credential.
+    /// Custom content denials still apply, and stdin accepts only one line.
+    pub(crate) fn ensure_user_secret(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() || bytes.iter().any(|b| matches!(b, b'\0' | b'\r' | b'\n')) {
+            return Err(Error::Invalid(
+                "enter one non-empty line for the secret".into(),
+            ));
+        }
+        match self.check_custom_content(bytes) {
+            Some(finding) => Err(finding.deny("the secret input")),
+            None => Ok(()),
+        }
     }
 
     /// Whether any `CREDENTIAL_ASSIGNMENT` hit in `bytes` assigns a secret.
@@ -543,6 +561,28 @@ mod tests {
 
     fn guard() -> Guard {
         Guard::new(&GuardConfig::default()).unwrap()
+    }
+
+    #[test]
+    fn dialog_input_accepts_credential_shapes_but_obeys_custom_denials() {
+        let guard = Guard::new(&GuardConfig {
+            deny_content: vec!["example-forbidden".into()],
+            ..GuardConfig::default()
+        })
+        .unwrap();
+        let example_key = b"AKIAABCDEFGHIJKLMNOP";
+        assert!(guard.ensure_content("command", example_key).is_err());
+        assert!(guard.ensure_user_secret(example_key).is_ok());
+
+        let error = guard.ensure_user_secret(b"example-forbidden").unwrap_err();
+        assert!(matches!(error, Error::Denied(_)));
+        assert!(!error.to_string().contains("example-forbidden"));
+        for input in [b"".as_slice(), b"two\nlines", b"two\rwords", b"two\0words"] {
+            assert!(matches!(
+                guard.ensure_user_secret(input),
+                Err(Error::Invalid(_))
+            ));
+        }
     }
 
     #[test]

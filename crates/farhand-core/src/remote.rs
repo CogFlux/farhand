@@ -35,7 +35,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::{default_shell, Limits, Os, RemoteConfig};
 use crate::error::{Error, Result};
-use crate::guard::StreamGuard;
+use crate::guard::{Guard, StreamGuard};
 use crate::text::shell_quote;
 
 /// Remote `timeout(1)` exit status; the Windows wrapper uses the same.
@@ -390,7 +390,40 @@ impl Remote {
         cwd: Option<&str>,
         timeout_secs: Option<u64>,
     ) -> Result<ExecOutput> {
+        self.exec_inner(command, cwd, timeout_secs, None).await
+    }
+
+    /// Send one user-approved secret line to a POSIX command's stdin.
+    /// Callers must let the user review the destination and exact command first.
+    pub async fn exec_with_secret(
+        &self,
+        guard: &Guard,
+        command: &str,
+        cwd: &str,
+        timeout_secs: Option<u64>,
+        secret: &[u8],
+    ) -> Result<ExecOutput> {
+        guard.ensure_content("the remote host", self.host().as_bytes())?;
+        guard.ensure_content("the command", command.as_bytes())?;
+        guard.ensure_content("the working directory", cwd.as_bytes())?;
+        guard.ensure_user_secret(secret)?;
+        self.exec_inner(command, Some(cwd), timeout_secs, Some(secret))
+            .await
+    }
+
+    async fn exec_inner(
+        &self,
+        command: &str,
+        cwd: Option<&str>,
+        timeout_secs: Option<u64>,
+        secret: Option<&[u8]>,
+    ) -> Result<ExecOutput> {
         let conn = self.conn().await?;
+        if secret.is_some() && conn.platform != Platform::Posix {
+            return Err(Error::Invalid(
+                "secret input requires a POSIX remote".into(),
+            ));
+        }
         let cwd = match cwd {
             Some(c) => self.resolve(c).await?,
             None => conn.workdir.clone(),
@@ -450,6 +483,23 @@ impl Remote {
             }
         };
         let run = async {
+            if let Some(secret) = secret {
+                // The command might echo its input or include it in an error.
+                cmd.stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let mut child = cmd.spawn().await?;
+                let mut stdin = child.stdin().take().expect("piped stdin");
+                let delivery = async {
+                    stdin.write_all(secret).await?;
+                    stdin.write_all(b"\n").await
+                }
+                .await;
+                drop(stdin);
+                let status = child.wait().await?;
+                delivery?;
+                return Ok((Collected::default(), Collected::default(), status));
+            }
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -1282,6 +1332,7 @@ pub fn normalize_windows(p: &str) -> String {
     }
 }
 
+#[derive(Default)]
 struct Collected {
     data: Vec<u8>,
     truncated: bool,
